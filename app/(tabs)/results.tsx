@@ -1,0 +1,397 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Picker } from '@react-native-picker/picker';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ScrollView, Text, TextInput, View } from 'react-native';
+
+type Division = 'Beginner' | 'Intermediate' | 'Advanced';
+type DivisionFilter = 'ALL' | Division;
+
+type SavedMatch = {
+  id: string;
+  week: number;
+  division: Division;
+  time: string;
+  court: number;
+  teamA: string;
+  teamB: string;
+};
+
+type ScoreFields = { g1: string; g2: string; g3: string };
+
+type PersistedMatchScore = {
+  matchId: string;
+  teamA: ScoreFields;
+  teamB: ScoreFields;
+  verified: boolean;
+  verifiedBy: string | null;
+  verifiedAt: number | null;
+};
+
+const STORAGE_KEY_MATCHES = 'ppl_matches_v1';
+const STORAGE_KEY_SCORES = 'ppl_scores_v1';
+const STORAGE_KEY_CURRENT_WEEK = 'ppl_current_week_v1';
+
+const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
+
+const TIMES: string[] = [
+  '6:00 PM','6:15 PM','6:30 PM','6:45 PM',
+  '7:00 PM','7:15 PM','7:30 PM','7:45 PM',
+  '8:00 PM','8:15 PM','8:30 PM','8:45 PM',
+  '9:00 PM','9:15 PM','9:30 PM','9:45 PM',
+];
+
+function toN(s: string) {
+  const n = parseInt(s || '0', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function totalOf(fields: ScoreFields) {
+  return toN(fields.g1) + toN(fields.g2) + toN(fields.g3);
+}
+
+function gamesEnteredCount(teamA: ScoreFields, teamB: ScoreFields) {
+  const a = [toN(teamA.g1), toN(teamA.g2), toN(teamA.g3)];
+  const b = [toN(teamB.g1), toN(teamB.g2), toN(teamB.g3)];
+  let entered = 0;
+
+  for (let i = 0; i < 3; i++) {
+    if (a[i] === 0 && b[i] === 0) continue;
+    entered += 1;
+  }
+  return entered;
+}
+
+function safeTrimLower(s: string) {
+  return (s ?? '').toString().trim().toLowerCase();
+}
+
+export default function ResultsScreen() {
+  const [matches, setMatches] = useState<SavedMatch[]>([]);
+  const [persisted, setPersisted] = useState<Record<string, PersistedMatchScore>>({});
+
+  // Filters
+  const [divisionFilter, setDivisionFilter] = useState<DivisionFilter>('ALL');
+  const [weekFilter, setWeekFilter] = useState<string>(''); // '' means not initialized yet
+  const [search, setSearch] = useState<string>('');
+
+  const loadAll = useCallback(async () => {
+    // Matches
+    const rawMatches = await AsyncStorage.getItem(STORAGE_KEY_MATCHES);
+    let parsedMatches: SavedMatch[] = [];
+    try {
+      const p = rawMatches ? JSON.parse(rawMatches) : [];
+      parsedMatches = Array.isArray(p) ? p : [];
+    } catch {
+      parsedMatches = [];
+    }
+    setMatches(parsedMatches);
+
+    // Scores
+    const rawScores = await AsyncStorage.getItem(STORAGE_KEY_SCORES);
+    let parsedScores: Record<string, PersistedMatchScore> = {};
+    try {
+      const p = rawScores ? JSON.parse(rawScores) : {};
+      parsedScores = p && typeof p === 'object' ? p : {};
+    } catch {
+      parsedScores = {};
+    }
+    setPersisted(parsedScores);
+
+    // Init week filter (only once)
+    if (weekFilter === '') {
+      const savedCurrentWeekRaw = await AsyncStorage.getItem(STORAGE_KEY_CURRENT_WEEK);
+      const savedCurrentWeek = savedCurrentWeekRaw ? parseInt(String(savedCurrentWeekRaw), 10) : NaN;
+
+      const weeks = Array.from(new Set(parsedMatches.map((m) => m.week)))
+        .filter((n) => Number.isFinite(n))
+        .sort((a, b) => a - b);
+
+      const newestWeek = weeks.length ? weeks[weeks.length - 1] : 1;
+
+      const initial =
+        Number.isFinite(savedCurrentWeek) && savedCurrentWeek > 0
+          ? savedCurrentWeek
+          : newestWeek;
+
+      setWeekFilter(String(initial));
+    }
+  }, [weekFilter]);
+
+  useEffect(() => {
+    void loadAll();
+    // also reload on web tab switching is not always reliable; but this is fine for now
+  }, [loadAll]);
+
+  const allWeeksSorted = useMemo(() => {
+    const weeks = Array.from(new Set(matches.map((m) => m.week)))
+      .filter((n) => Number.isFinite(n))
+      .sort((a, b) => a - b);
+    return weeks;
+  }, [matches]);
+
+  const filteredMatches = useMemo(() => {
+    const q = safeTrimLower(search);
+
+    const base = matches.filter((m) => {
+      // Division filter
+      if (divisionFilter !== 'ALL' && m.division !== divisionFilter) return false;
+
+      // Week filter
+      if (weekFilter !== 'ALL' && weekFilter !== '') {
+        const w = parseInt(weekFilter, 10);
+        if (Number.isFinite(w) && m.week !== w) return false;
+      }
+
+      // Search filter (team names)
+      if (q) {
+        const a = safeTrimLower(m.teamA);
+        const b = safeTrimLower(m.teamB);
+        if (!a.includes(q) && !b.includes(q)) return false;
+      }
+
+      return true;
+    });
+
+    // Sort like schedule-ish: division order then week then time then court
+    return [...base].sort((a, b) => {
+      const da = DIVISION_ORDER.indexOf(a.division);
+      const db = DIVISION_ORDER.indexOf(b.division);
+      if (da !== db) return da - db;
+
+      if (a.week !== b.week) return a.week - b.week;
+
+      const ta = TIMES.indexOf(a.time);
+      const tb = TIMES.indexOf(b.time);
+      if (ta !== tb) return ta - tb;
+
+      return a.court - b.court;
+    });
+  }, [matches, divisionFilter, weekFilter, search]);
+
+  // Group by division, but only show divisions that have rows after filter
+  const grouped = useMemo(() => {
+    const map = new Map<Division, SavedMatch[]>();
+    for (const m of filteredMatches) {
+      if (!map.has(m.division)) map.set(m.division, []);
+      map.get(m.division)!.push(m);
+    }
+    return DIVISION_ORDER
+      .filter((d) => map.has(d))
+      .map((division) => ({ division, matches: map.get(division)! }));
+  }, [filteredMatches]);
+
+  const showWeekValue = weekFilter === '' ? '1' : weekFilter;
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 16 }}>
+      <Text style={{ fontSize: 24, fontWeight: '900', marginBottom: 6 }}>Results</Text>
+
+      <Text style={{ color: '#444', marginBottom: 12 }}>
+        Read-only league results (scheduled matches + saved scores).
+      </Text>
+
+      {/* Division dropdown */}
+      <Text style={{ fontWeight: '800', marginBottom: 6 }}>Division</Text>
+      <View style={{ borderWidth: 1, borderColor: '#ccc', borderRadius: 10, marginBottom: 14 }}>
+        <Picker
+          selectedValue={divisionFilter}
+          onValueChange={(v) => setDivisionFilter(String(v) as DivisionFilter)}
+        >
+          <Picker.Item label="All Divisions" value="ALL" />
+          <Picker.Item label="Advanced" value="Advanced" />
+          <Picker.Item label="Intermediate" value="Intermediate" />
+          <Picker.Item label="Beginner" value="Beginner" />
+        </Picker>
+      </View>
+
+      {/* Week dropdown */}
+      <Text style={{ fontWeight: '800', marginBottom: 6 }}>Week</Text>
+      <View style={{ borderWidth: 1, borderColor: '#ccc', borderRadius: 10, marginBottom: 14 }}>
+        <Picker
+          selectedValue={showWeekValue}
+          onValueChange={(v) => setWeekFilter(String(v))}
+        >
+          <Picker.Item label="All Weeks" value="ALL" />
+          {allWeeksSorted.length === 0 ? (
+            <Picker.Item label="Week 1" value="1" />
+          ) : (
+            allWeeksSorted.map((w) => (
+              <Picker.Item key={w} label={`Week ${w}`} value={String(w)} />
+            ))
+          )}
+        </Picker>
+      </View>
+
+      {/* Search */}
+      <Text style={{ fontWeight: '800', marginBottom: 6 }}>Search</Text>
+      <TextInput
+        value={search}
+        onChangeText={setSearch}
+        placeholder="Type a player or team name (e.g., brandon)"
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={{
+          borderWidth: 1,
+          borderColor: '#ccc',
+          borderRadius: 10,
+          padding: 12,
+          marginBottom: 14,
+        }}
+      />
+
+      {matches.length === 0 ? (
+        <Text>No scheduled matches found yet.</Text>
+      ) : filteredMatches.length === 0 ? (
+        <Text>No matches found for these filters.</Text>
+      ) : (
+        <View style={{ gap: 18 }}>
+          {grouped.map((section) => (
+            <View key={section.division}>
+              <Text style={{ fontSize: 20, fontWeight: '900', marginBottom: 10 }}>
+                {section.division}
+              </Text>
+
+              <View style={{ gap: 14 }}>
+                {section.matches.map((m) => {
+                  const p = persisted[m.id];
+
+                  const aFields: ScoreFields = p?.teamA ?? { g1: '', g2: '', g3: '' };
+                  const bFields: ScoreFields = p?.teamB ?? { g1: '', g2: '', g3: '' };
+
+                  const aTotal = totalOf(aFields);
+                  const bTotal = totalOf(bFields);
+
+                  const enteredGames = p ? gamesEnteredCount(aFields, bFields) : 0;
+
+                  // Labels:
+                  // - none if nothing entered
+                  // - PARTIAL if 1-2 games entered
+                  // - COMPLETED if 3 games entered
+                  const label =
+                    enteredGames === 0
+                      ? null
+                      : enteredGames < 3
+                        ? 'PARTIAL'
+                        : 'COMPLETED';
+
+                  const labelColor =
+                    label === 'COMPLETED' ? 'green' : label === 'PARTIAL' ? 'red' : 'black';
+
+                  const verifiedLabel = p?.verified
+                    ? `Verified by ${p.verifiedBy ?? 'UNKNOWN'}`
+                    : 'Not verified yet';
+
+                  return (
+                    <View
+                      key={m.id}
+                      style={{
+                        borderWidth: 2,
+                        borderColor: '#000',
+                        borderRadius: 10,
+                        overflow: 'hidden',
+                        backgroundColor: 'white',
+                      }}
+                    >
+                      <View
+                        style={{
+                          paddingVertical: 8,
+                          paddingHorizontal: 10,
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#000',
+                        }}
+                      >
+                        <Text style={{ fontWeight: '900' }}>
+                          Week {m.week} • {m.time} • Court {m.court}
+                        </Text>
+
+                        <Text style={{ marginTop: 4, color: '#333', fontWeight: '700' }}>
+                          {verifiedLabel}
+                          {label ? (
+                            <>
+                              {' • '}
+                              <Text style={{ color: labelColor, fontWeight: '900' }}>
+                                {label}
+                              </Text>
+                            </>
+                          ) : null}
+                        </Text>
+                      </View>
+
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#000',
+                          paddingVertical: 8,
+                          backgroundColor: '#f5f5f5',
+                        }}
+                      >
+                        <Text style={{ width: 110, fontWeight: '900', textAlign: 'center' }}>
+                          TIME
+                        </Text>
+                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                          COURT #
+                        </Text>
+                        <Text style={{ flex: 2, fontWeight: '900', textAlign: 'center' }}>
+                          TEAM NAME
+                        </Text>
+                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                          G1
+                        </Text>
+                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                          G2
+                        </Text>
+                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                          G3
+                        </Text>
+                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                          TOTAL
+                        </Text>
+                      </View>
+
+                      {/* TEAM A */}
+                      <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
+                        <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
+                        <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
+                        <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamA}</Text>
+
+                        <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g1 || '-'}</Text>
+                        <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g2 || '-'}</Text>
+                        <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g3 || '-'}</Text>
+
+                        <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>
+                          {aTotal}
+                        </Text>
+                      </View>
+
+                      <View style={{ height: 1, backgroundColor: '#000' }} />
+
+                      {/* TEAM B */}
+                      <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
+                        <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
+                        <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
+                        <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamB}</Text>
+
+                        <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g1 || '-'}</Text>
+                        <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g2 || '-'}</Text>
+                        <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g3 || '-'}</Text>
+
+                        <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>
+                          {bTotal}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+
+              <View style={{ height: 6 }} />
+            </View>
+          ))}
+        </View>
+      )}
+
+      <View style={{ height: 30 }} />
+    </ScrollView>
+  );
+}
