@@ -266,9 +266,7 @@ function asScoreFields(v: any): ScoreFields {
 }
 
 async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedMatchScore>> {
-  const url = supabaseRestUrl(
-    'match_scores?select=match_id,team_a,team_b,verified,verified_by,verified_at_ms'
-  );
+  const url = supabaseRestUrl('match_scores?select=match_id,team_a,team_b,verified,verified_by,verified_at_ms');
 
   const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
   if (!res.ok) {
@@ -443,6 +441,9 @@ export default function StandingsScreen() {
   const computed = useMemo(() => {
     const totals = new Map<string, TeamTotals>();
 
+    // ✅ If Week 1 baseline is missing on this device/browser, fall back to counting Week 1 from verified Supabase scores.
+    const startWeekForThisDevice = baseRows.length > 0 ? START_WEEK_FOR_AUTOCALC : 1;
+
     // 0) Ensure ALL known teams exist (even if they have 0 games)
     const baselineAll = [
       ...DEFAULT_TEAMS_BY_DIVISION.Advanced,
@@ -479,7 +480,7 @@ export default function StandingsScreen() {
       });
     }
 
-    // 1) Seed totals from baseRows (Week 1 baseline)
+    // 1) Seed totals from baseRows (Week 1 baseline) if present
     for (const r of baseRows) {
       addTotals(totals, {
         team: r.team,
@@ -492,9 +493,9 @@ export default function StandingsScreen() {
       });
     }
 
-    // 2) Add Week 2+ from VERIFIED scores only (from Supabase)
+    // 2) Add from VERIFIED scores only (from Supabase)
     for (const m of matches) {
-      if (m.week < START_WEEK_FOR_AUTOCALC) continue;
+      if (m.week < startWeekForThisDevice) continue;
 
       const s = scores[m.id];
       if (!s || !s.verified) continue;
@@ -595,13 +596,18 @@ export default function StandingsScreen() {
     });
   }, [matches, scores, baseRows, divisionMoves, dbTeams, supabaseDivisionByTeam]);
 
+  const standingsInfoText = useMemo(() => {
+    if (baseRows.length > 0) {
+      return `Standings are based on: Week 1 baseline + verified scores from Week ${START_WEEK_FOR_AUTOCALC}+ (synced via Supabase).`;
+    }
+    return `Standings are based on: verified scores from Week 1+ (synced via Supabase).`;
+  }, [baseRows.length]);
+
   return (
     <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <Text style={{ fontSize: 26, fontWeight: '900', marginBottom: 6 }}>Standings</Text>
 
-      <Text style={{ color: '#444', marginBottom: 12 }}>
-        Standings are based on: Week 1 baseline + verified scores from Week {START_WEEK_FOR_AUTOCALC}+ (synced via Supabase).
-      </Text>
+      <Text style={{ color: '#444', marginBottom: 12 }}>{standingsInfoText}</Text>
 
       {teamsLoadError ? (
         <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
