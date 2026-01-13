@@ -48,13 +48,11 @@ type DivisionMove = {
   createdAt: number;
 };
 
-// Week 1 baseline stored here:
-const STORAGE_KEY_BASE = 'ppl_standings_base_v1';
-
 // ✅ Division moves stored here (from your Admin screen)
 const STORAGE_KEY_DIVISION_MOVES = 'ppl_division_moves_v1';
 
-// We will ONLY calculate additions from week >= 2
+// If Week 1 baseline has real stats, we only add week >= 2.
+// If baseline is missing (or only has team list), we calculate from Week 1+ via Supabase scores.
 const START_WEEK_FOR_AUTOCALC = 2;
 
 const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
@@ -128,6 +126,19 @@ type SupabaseMatchScoreRow = {
   verified: boolean;
   verified_by: string | null;
   verified_at_ms: number | null;
+};
+
+type SupabaseStandingsBaseRow = {
+  id?: string;
+  created_at?: string;
+  division: string;
+  team: string;
+  // NOTE: your current table may NOT have numeric columns — we handle that safely.
+  games_played?: number | null;
+  wins?: number | null;
+  losses?: number | null;
+  points_for?: number | null;
+  points_against?: number | null;
 };
 
 function normalizeName(s: string) {
@@ -258,7 +269,6 @@ async function fetchMatchesFromSupabase(): Promise<SavedMatch[]> {
 }
 
 function asScoreFields(v: any): ScoreFields {
-  // handle strings or numbers defensively
   const g1 = v?.g1 == null ? '' : String(v.g1);
   const g2 = v?.g2 == null ? '' : String(v.g2);
   const g3 = v?.g3 == null ? '' : String(v.g3);
@@ -292,10 +302,60 @@ async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedM
   return out;
 }
 
+/**
+ * ✅ Week 1 baseline (read-only forever) now lives in Supabase table: standings_base
+ * We load it for EVERY device (Vercel included).
+ *
+ * Your current table may only have: division + team.
+ * If numeric columns exist later, we’ll use them automatically.
+ */
+async function fetchStandingsBaseFromSupabase(): Promise<TeamRow[]> {
+  // Try selecting numeric columns too (if they exist). If they don't, Supabase may error.
+  // So we do a safe fallback attempt.
+  const tryUrls = [
+    supabaseRestUrl(
+      'standings_base?select=division,team,games_played,wins,losses,points_for,points_against&order=division.asc&order=team.asc'
+    ),
+    supabaseRestUrl('standings_base?select=division,team&order=division.asc&order=team.asc'),
+  ];
+
+  let lastErr = '';
+
+  for (const url of tryUrls) {
+    const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
+    if (!res.ok) {
+      lastErr = await res.text().catch(() => '');
+      continue;
+    }
+
+    const rows = (await res.json()) as SupabaseStandingsBaseRow[];
+
+    const out: TeamRow[] = [];
+    for (const r of rows) {
+      if (!isDivision(r.division)) continue;
+      const team = normalizeName(r.team);
+      if (!team) continue;
+
+      out.push({
+        division: r.division,
+        team,
+        gamesPlayed: Number(r.games_played ?? 0) || 0,
+        wins: Number(r.wins ?? 0) || 0,
+        losses: Number(r.losses ?? 0) || 0,
+        pointsFor: Number(r.points_for ?? 0) || 0,
+        pointsAgainst: Number(r.points_against ?? 0) || 0,
+      });
+    }
+
+    return out;
+  }
+
+  throw new Error(`Failed to load standings_base from Supabase. ${lastErr ? `Details: ${lastErr}` : ''}`);
+}
+
 // ✅ Internal totals keyed by TEAM ONLY (so records can carry across divisions)
 type TeamTotals = {
   team: string;
-  // Best guess “original division” (used if no moves exist)
   originalDivision: Division;
   gamesPlayed: number;
   wins: number;
@@ -340,7 +400,7 @@ export default function StandingsScreen() {
   const [matches, setMatches] = useState<SavedMatch[]>([]);
   const [scores, setScores] = useState<Record<string, PersistedMatchScore>>({});
 
-  // Week 1 baseline + division moves (still local, admin-controlled)
+  // Week 1 baseline + division moves
   const [baseRows, setBaseRows] = useState<TeamRow[]>([]);
   const [divisionMoves, setDivisionMoves] = useState<DivisionMove[]>([]);
 
@@ -354,6 +414,7 @@ export default function StandingsScreen() {
   const [teamsLoadError, setTeamsLoadError] = useState<string>('');
   const [matchesLoadError, setMatchesLoadError] = useState<string>('');
   const [scoresLoadError, setScoresLoadError] = useState<string>('');
+  const [baseLoadError, setBaseLoadError] = useState<string>('');
 
   const refreshTeams = useCallback(async () => {
     setTeamsLoadError('');
@@ -387,21 +448,19 @@ export default function StandingsScreen() {
     }
   }, []);
 
-  const loadLocalAdminData = useCallback(async () => {
-    const [rawBase, rawMoves] = await Promise.all([
-      AsyncStorage.getItem(STORAGE_KEY_BASE),
-      AsyncStorage.getItem(STORAGE_KEY_DIVISION_MOVES),
-    ]);
-
-    // Base Week 1
+  const loadAdminData = useCallback(async () => {
+    // 1) Week 1 baseline from Supabase (shared forever)
+    setBaseLoadError('');
     try {
-      const parsed = rawBase ? JSON.parse(rawBase) : [];
-      setBaseRows(Array.isArray(parsed) ? parsed : []);
-    } catch {
+      const base = await fetchStandingsBaseFromSupabase();
+      setBaseRows(Array.isArray(base) ? base : []);
+    } catch (e: any) {
       setBaseRows([]);
+      setBaseLoadError(e?.message || 'Failed to load Week 1 baseline from Supabase.');
     }
 
-    // Division Moves
+    // 2) Division moves still local/admin-controlled (for now)
+    const rawMoves = await AsyncStorage.getItem(STORAGE_KEY_DIVISION_MOVES);
     try {
       const parsed = rawMoves ? JSON.parse(rawMoves) : [];
       setDivisionMoves(Array.isArray(parsed) ? parsed : []);
@@ -414,16 +473,16 @@ export default function StandingsScreen() {
     void refreshTeams();
     void refreshMatches();
     void refreshScores();
-    void loadLocalAdminData();
-  }, [refreshTeams, refreshMatches, refreshScores, loadLocalAdminData]);
+    void loadAdminData();
+  }, [refreshTeams, refreshMatches, refreshScores, loadAdminData]);
 
   useFocusEffect(
     useCallback(() => {
       void refreshTeams();
       void refreshMatches();
       void refreshScores();
-      void loadLocalAdminData();
-    }, [refreshTeams, refreshMatches, refreshScores, loadLocalAdminData])
+      void loadAdminData();
+    }, [refreshTeams, refreshMatches, refreshScores, loadAdminData])
   );
 
   const supabaseDivisionByTeam = useMemo(() => {
@@ -438,11 +497,23 @@ export default function StandingsScreen() {
     return map;
   }, [dbTeams]);
 
+  const baselineHasStats = useMemo(() => {
+    return baseRows.some(
+      (r) =>
+        (r.gamesPlayed ?? 0) > 0 ||
+        (r.wins ?? 0) > 0 ||
+        (r.losses ?? 0) > 0 ||
+        (r.pointsFor ?? 0) > 0 ||
+        (r.pointsAgainst ?? 0) > 0
+    );
+  }, [baseRows]);
+
   const computed = useMemo(() => {
     const totals = new Map<string, TeamTotals>();
 
-    // ✅ If Week 1 baseline is missing on this device/browser, fall back to counting Week 1 from verified Supabase scores.
-    const startWeekForThisDevice = baseRows.length > 0 ? START_WEEK_FOR_AUTOCALC : 1;
+    // ✅ If baseline has REAL Week 1 stats, we only add from week >= 2.
+    // ✅ If baseline is empty OR only teams/divisions, we calculate from week 1+ via Supabase verified scores.
+    const startWeekForThisDevice = baselineHasStats ? START_WEEK_FOR_AUTOCALC : 1;
 
     // 0) Ensure ALL known teams exist (even if they have 0 games)
     const baselineAll = [
@@ -459,7 +530,9 @@ export default function StandingsScreen() {
 
     const fromMatchesAll = matches.flatMap((m) => [m.teamA, m.teamB]);
 
-    const allKnownTeams = uniqSorted([...baselineAll, ...supaAll, ...fromMatchesAll]);
+    const baseTeamList = baseRows.map((r) => r.team);
+
+    const allKnownTeams = uniqSorted([...baselineAll, ...supaAll, ...fromMatchesAll, ...baseTeamList]);
 
     for (const team of allKnownTeams) {
       const t = normalizeName(team);
@@ -480,17 +553,19 @@ export default function StandingsScreen() {
       });
     }
 
-    // 1) Seed totals from baseRows (Week 1 baseline) if present
-    for (const r of baseRows) {
-      addTotals(totals, {
-        team: r.team,
-        originalDivision: r.division,
-        gamesPlayed: r.gamesPlayed,
-        wins: r.wins,
-        losses: r.losses,
-        pointsFor: r.pointsFor,
-        pointsAgainst: r.pointsAgainst,
-      });
+    // 1) Seed totals from baseRows (Week 1 baseline) if baseline includes stats
+    if (baselineHasStats) {
+      for (const r of baseRows) {
+        addTotals(totals, {
+          team: r.team,
+          originalDivision: r.division,
+          gamesPlayed: r.gamesPlayed,
+          wins: r.wins,
+          losses: r.losses,
+          pointsFor: r.pointsFor,
+          pointsAgainst: r.pointsAgainst,
+        });
+      }
     }
 
     // 2) Add from VERIFIED scores only (from Supabase)
@@ -594,20 +669,26 @@ export default function StandingsScreen() {
 
       return { division, rows };
     });
-  }, [matches, scores, baseRows, divisionMoves, dbTeams, supabaseDivisionByTeam]);
+  }, [matches, scores, baseRows, divisionMoves, dbTeams, supabaseDivisionByTeam, baselineHasStats]);
 
   const standingsInfoText = useMemo(() => {
-    if (baseRows.length > 0) {
+    if (baselineHasStats) {
       return `Standings are based on: Week 1 baseline + verified scores from Week ${START_WEEK_FOR_AUTOCALC}+ (synced via Supabase).`;
     }
     return `Standings are based on: verified scores from Week 1+ (synced via Supabase).`;
-  }, [baseRows.length]);
+  }, [baselineHasStats]);
 
   return (
     <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <Text style={{ fontSize: 26, fontWeight: '900', marginBottom: 6 }}>Standings</Text>
 
       <Text style={{ color: '#444', marginBottom: 12 }}>{standingsInfoText}</Text>
+
+      {baseLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Baseline sync warning: {baseLoadError}
+        </Text>
+      ) : null}
 
       {teamsLoadError ? (
         <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
