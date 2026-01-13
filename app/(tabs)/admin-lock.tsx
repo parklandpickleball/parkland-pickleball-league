@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Pressable, Text, TextInput, View } from 'react-native';
 
 const ADMIN_UNLOCK_KEY = 'ppl_admin_unlocked';
@@ -19,12 +19,26 @@ export default function AdminLockScreen() {
     })();
   }, [router]);
 
+  // ✅ Every time this screen is shown, clear the passcode field
+  useFocusEffect(
+    useCallback(() => {
+      setCode('');
+      return () => {
+        setCode('');
+      };
+    }, [])
+  );
+
   const onUnlock = async () => {
-    if (code.trim() !== ADMIN_PASSCODE) {
+    const entered = code.trim();
+
+    if (entered !== ADMIN_PASSCODE) {
       Alert.alert('Wrong code', 'Try again.');
       return;
     }
+
     await AsyncStorage.setItem(ADMIN_UNLOCK_KEY, 'true');
+    setCode(''); // ✅ clear immediately after success
     router.replace('/admin');
   };
 
@@ -33,9 +47,8 @@ export default function AdminLockScreen() {
       <Text style={{ fontSize: 26, fontWeight: '800', marginBottom: 12 }}>
         Admin Access
       </Text>
-      <Text style={{ marginBottom: 16 }}>
-        Enter passcode to continue.
-      </Text>
+
+      <Text style={{ marginBottom: 16 }}>Enter passcode to continue.</Text>
 
       <TextInput
         value={code}
@@ -43,6 +56,11 @@ export default function AdminLockScreen() {
         placeholder="Passcode"
         keyboardType="number-pad"
         secureTextEntry
+        autoCorrect={false}
+        autoCapitalize="none"
+        textContentType="oneTimeCode"
+        autoComplete="off"
+        importantForAutofill="no"
         style={{
           borderWidth: 1,
           borderColor: '#ccc',

@@ -4,8 +4,6 @@ import React, { useEffect, useState } from 'react';
 import { Alert, Pressable, Text, TextInput, View } from 'react-native';
 
 const LEAGUE_UNLOCK_KEY = 'ppl_league_unlocked';
-
-// ✅ Change this to whatever you want and then text/email it to the league
 const LEAGUE_CODE = 'PPL2026';
 
 export default function LeagueLockScreen() {
@@ -16,11 +14,12 @@ export default function LeagueLockScreen() {
     const check = async () => {
       const unlocked = await AsyncStorage.getItem(LEAGUE_UNLOCK_KEY);
       if (unlocked === 'true') {
-        router.replace('/schedule');
+        // ✅ Send to root so tabs context is guaranteed
+        router.replace('/');
       }
     };
     void check();
-  }, []);
+  }, [router]);
 
   const onUnlock = async () => {
     const cleaned = (code || '').trim();
@@ -37,9 +36,8 @@ export default function LeagueLockScreen() {
 
     await AsyncStorage.setItem(LEAGUE_UNLOCK_KEY, 'true');
 
-    // After unlocking, send them into the app flow.
-    // Your Team Gate will handle forcing /team if needed.
-    router.replace('/schedule');
+    // ✅ Always go through root to avoid Unmatched Route during review
+    router.replace('/');
   };
 
   return (

@@ -16,7 +16,6 @@ export default function AdminScreen() {
       const ok = v === 'true';
       setIsUnlocked(ok);
 
-      // If not unlocked, force the lock screen
       if (!ok) {
         router.replace('/admin-lock');
       }
@@ -25,7 +24,6 @@ export default function AdminScreen() {
     }
   }, [router]);
 
-  // ✅ Re-check every time you tap the Admin tab
   useFocusEffect(
     useCallback(() => {
       setChecking(true);
@@ -34,7 +32,6 @@ export default function AdminScreen() {
   );
 
   const onLock = async () => {
-    // ✅ Make it explicit: set to "false" so every screen agrees
     await AsyncStorage.setItem(ADMIN_UNLOCK_KEY, 'false');
     setIsUnlocked(false);
 
@@ -46,6 +43,22 @@ export default function AdminScreen() {
     router.push('/admin-schedule');
   };
 
+  const goToAttendance = () => {
+    router.push('/admin-attendance' as any);
+  };
+
+  const goToAdminAnnouncements = () => {
+    router.push('/admin-announcements');
+  };
+
+  const goToDivisionMoves = () => {
+    router.push('/admin-division-moves' as any);
+  };
+
+  const goToManageTeams = () => {
+    router.push('/admin-teams' as any);
+  };
+
   if (checking) {
     return (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
@@ -54,14 +67,30 @@ export default function AdminScreen() {
     );
   }
 
-  // If we are unlocked, show dashboard. If not, we already redirected.
   if (!isUnlocked) {
     return (
       <View style={{ flex: 1, padding: 24 }}>
-        <Text style={{ fontSize: 18, fontWeight: '800' }}>Redirecting to Admin Lock…</Text>
+        <Text style={{ fontSize: 18, fontWeight: '800' }}>
+          Redirecting to Admin Lock…
+        </Text>
       </View>
     );
   }
+
+  const buttonStyle = {
+    backgroundColor: '#111',
+    padding: 14,
+    borderRadius: 10,
+    alignItems: 'center' as const,
+    marginBottom: 12,
+    maxWidth: 260,
+  };
+
+  const buttonTextStyle = {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '700' as const,
+  };
 
   return (
     <View style={{ flex: 1, padding: 24 }}>
@@ -69,24 +98,28 @@ export default function AdminScreen() {
         Admin Dashboard
       </Text>
 
-      <Text style={{ marginBottom: 18 }}>
-        Choose an admin tool below.
-      </Text>
+      <Text style={{ marginBottom: 18 }}>Choose an admin tool below.</Text>
 
-      <Pressable
-        onPress={goToScheduleBuilder}
-        style={{
-          backgroundColor: '#111',
-          padding: 14,
-          borderRadius: 10,
-          alignItems: 'center',
-          marginBottom: 12,
-          maxWidth: 260,
-        }}
-      >
-        <Text style={{ color: 'white', fontSize: 16, fontWeight: '700' }}>
-          Schedule Builder
-        </Text>
+      <Pressable onPress={goToScheduleBuilder} style={buttonStyle}>
+        <Text style={buttonTextStyle}>Schedule Builder</Text>
+      </Pressable>
+
+      <Pressable onPress={goToAttendance} style={buttonStyle}>
+        <Text style={buttonTextStyle}>Attendance</Text>
+      </Pressable>
+
+      <Pressable onPress={goToAdminAnnouncements} style={buttonStyle}>
+        <Text style={buttonTextStyle}>Admin Announcements</Text>
+      </Pressable>
+
+      {/* ✅ RESTORED: Division Moves button */}
+      <Pressable onPress={goToDivisionMoves} style={buttonStyle}>
+        <Text style={buttonTextStyle}>Division Moves (Mid-Season)</Text>
+      </Pressable>
+
+      {/* ✅ NEW: Manage Teams button */}
+      <Pressable onPress={goToManageTeams} style={buttonStyle}>
+        <Text style={buttonTextStyle}>Manage Teams (Add Mid-Season)</Text>
       </Pressable>
 
       <Pressable
@@ -97,6 +130,7 @@ export default function AdminScreen() {
           borderRadius: 10,
           alignItems: 'center',
           maxWidth: 260,
+          marginTop: 8,
         }}
       >
         <Text style={{ color: 'white', fontSize: 16, fontWeight: '700' }}>

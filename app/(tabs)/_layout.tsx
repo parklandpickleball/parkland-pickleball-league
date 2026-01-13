@@ -105,6 +105,13 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+  name="admin-division-moves"
+  options={{
+    href: null, // ✅ hides it from the tab bar and deep links
+  }}
+/>
+
 
       <Tabs.Screen
         name="sponsors"
@@ -115,6 +122,9 @@ export default function TabLayout() {
           ),
         }}
       />
+
+    <Tabs.Screen name="admin-teams" options={{ href: null }} />
+
 
       {/* Admin MUST be last */}
       <Tabs.Screen
@@ -130,6 +140,8 @@ export default function TabLayout() {
       {/* Hidden internal admin routes */}
       <Tabs.Screen name="admin" options={{ href: null }} />
       <Tabs.Screen name="admin-schedule" options={{ href: null }} />
+      <Tabs.Screen name="admin-attendance" options={{ href: null }} />
+      <Tabs.Screen name="admin-announcements" options={{ href: null }} />
     </Tabs>
   );
 }

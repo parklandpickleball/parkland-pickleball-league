@@ -1,6 +1,7 @@
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Notifications from "expo-notifications";
 import React, { useEffect, useMemo, useState } from "react";
 import {
     Alert,
@@ -32,20 +33,16 @@ type Post = {
 
 const STORAGE_KEY = "ppl_announcements_posts_v1";
 
-// Identity keys (from app/team.tsx)
-const STORAGE_KEY_TEAM = "ppl_selected_team";
-const STORAGE_KEY_PLAYER_NAME = "ppl_selected_player_name";
-
 // ✅ OFFICIAL badge image (Season 3 logo)
 const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo.png");
 
-export default function AnnouncementsScreen() {
+export default function AdminAnnouncementsScreen() {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<Post[]>([]);
   const [text, setText] = useState("");
 
-  // Current identity
-  const [currentAuthor, setCurrentAuthor] = useState<string>("Unknown");
+  // Admin identity (admin posts are always authored as ADMIN)
+  const currentAuthor = "ADMIN";
 
   // Inline reply UI state (one post at a time)
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
@@ -56,20 +53,11 @@ export default function AnnouncementsScreen() {
 
     (async () => {
       try {
-        const [rawPosts, team, playerName] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEY),
-          AsyncStorage.getItem(STORAGE_KEY_TEAM),
-          AsyncStorage.getItem(STORAGE_KEY_PLAYER_NAME),
-        ]);
-
+        const rawPosts = await AsyncStorage.getItem(STORAGE_KEY);
         const parsed: any = rawPosts ? JSON.parse(rawPosts) : [];
         const list = Array.isArray(parsed) ? parsed : [];
 
-        const name = (playerName || "").trim();
-        const teamName = (team || "").trim();
-        const who =
-          name && teamName ? `${name} (${teamName})` : name ? name : "Unknown";
-
+        // Normalize posts + replies (back-compat safe)
         const normalized: Post[] = list.map((p: any) => {
           const author =
             typeof p.author === "string" && p.author.trim() ? p.author : "Unknown";
@@ -93,15 +81,9 @@ export default function AnnouncementsScreen() {
           };
         });
 
-        if (mounted) {
-          setPosts(normalized);
-          setCurrentAuthor(who);
-        }
+        if (mounted) setPosts(normalized);
       } catch {
-        if (mounted) {
-          setPosts([]);
-          setCurrentAuthor("Unknown");
-        }
+        if (mounted) setPosts([]);
       } finally {
         if (mounted) setLoading(false);
       }
@@ -130,13 +112,45 @@ export default function AnnouncementsScreen() {
     return new Date(ms).toLocaleString();
   }
 
-  const canDeletePost = (p: Post) => {
-    return p.author === currentAuthor;
-  };
+  // ✅ Admin screen: admin can delete ANY post/reply
+  const canDeletePost = (_p: Post) => true;
+  const canDeleteReply = (_r: Reply) => true;
 
-  const canDeleteReply = (r: Reply) => {
-    return r.author === currentAuthor;
-  };
+  // 🔔 Admin-post notification trigger (ADMIN POSTS ONLY)
+  // ✅ SDK 54-safe: uses scheduleNotificationAsync(trigger:null)
+  async function triggerAdminPostNotification(message: string) {
+    try {
+      // Never on web
+      if (Platform.OS === "web") return;
+
+      // Ensure permission (local notifications on iOS still require permission)
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== "granted") {
+        const req = await Notifications.requestPermissionsAsync();
+        finalStatus = req.status;
+      }
+
+      if (finalStatus !== "granted") {
+        // Permission denied → do nothing (no blocking)
+        return;
+      }
+
+      const body = message.length > 120 ? message.slice(0, 117) + "..." : message;
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "PPL Admin Announcement",
+          body,
+          sound: "default",
+        },
+        trigger: null, // immediate (foreground-safe with handler in _layout)
+      });
+    } catch {
+      // silent fail
+    }
+  }
 
   async function onPost() {
     const trimmed = text.trim();
@@ -147,27 +161,18 @@ export default function AnnouncementsScreen() {
       type: "COMMUNITY",
       text: trimmed,
       createdAt: Date.now(),
-      author: currentAuthor || "Unknown",
+      author: currentAuthor, // ✅ ADMIN posts only from here
       replies: [],
     };
 
     setText("");
     await persist([newPost, ...posts]);
-  }
 
-  async function onClearAll() {
-    Alert.alert("Clear all posts?", "This only clears this device.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Clear", style: "destructive", onPress: () => persist([]) },
-    ]);
+    // ✅ ONLY admin-posted announcements trigger a notification
+    await triggerAdminPostNotification(trimmed);
   }
 
   async function onDeletePost(post: Post) {
-    if (!canDeletePost(post)) {
-      Alert.alert("Not allowed", "You can only delete your own posts.");
-      return;
-    }
-
     const doDelete = async () => {
       const next = posts.filter((p) => p.id !== post.id);
       await persist(next);
@@ -204,7 +209,7 @@ export default function AnnouncementsScreen() {
       id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
       text: trimmed,
       createdAt: Date.now(),
-      author: currentAuthor || "Unknown",
+      author: currentAuthor, // replies from admin screen are ADMIN
     };
 
     const next = posts.map((p) => {
@@ -215,14 +220,11 @@ export default function AnnouncementsScreen() {
     setReplyText("");
     setReplyingToPostId(null);
     await persist(next);
+
+    // 🚫 IMPORTANT: Replies do NOT trigger notifications
   }
 
   async function onDeleteReply(postId: string, reply: Reply) {
-    if (!canDeleteReply(reply)) {
-      Alert.alert("Not allowed", "You can only delete your own replies.");
-      return;
-    }
-
     const doDelete = async () => {
       const next = posts.map((p) => {
         if (p.id !== postId) return p;
@@ -246,29 +248,17 @@ export default function AnnouncementsScreen() {
 
   const header = (
     <View style={styles.headerWrap}>
-      <ThemedText type="title">Announcements</ThemedText>
+      <ThemedText type="title">Admin Announcements</ThemedText>
 
       <ThemedText style={styles.subtitle}>
-        Community messages only. Official announcements are posted from Admin.
+        Post official announcements here. These appear in the community Announcements tab.
       </ThemedText>
-
-      <View style={styles.typeRow}>
-        <View style={[styles.typePill, styles.typePillActive]}>
-          <ThemedText>Community</ThemedText>
-        </View>
-
-        <View style={{ flex: 1 }} />
-
-        <Pressable onPress={onClearAll}>
-          <ThemedText>Clear</ThemedText>
-        </Pressable>
-      </View>
 
       <View style={styles.composer}>
         <TextInput
           value={text}
           onChangeText={setText}
-          placeholder="Type a message..."
+          placeholder="Type an official announcement..."
           placeholderTextColor="#999"
           style={styles.input}
           multiline
@@ -290,22 +280,19 @@ export default function AnnouncementsScreen() {
           ListHeaderComponent={header}
           contentContainerStyle={{ padding: 16 }}
           renderItem={({ item }) => {
-            const isOfficial = item.author === "ADMIN";
+            const isAdminPost = item.author === "ADMIN";
+            const headerLabel = isAdminPost ? "ADMIN" : "COMMUNITY";
+            const displayAuthor = isAdminPost ? "ADMIN" : item.author;
+
             return (
               <View style={styles.card}>
                 <View style={styles.cardTopRow}>
                   <View style={styles.leftHeaderRow}>
-                    <ThemedText type="defaultSemiBold">
-  {item.author === "ADMIN" ? "ADMIN" : "COMMUNITY"}
-</ThemedText>
+                    <ThemedText type="defaultSemiBold">{headerLabel}</ThemedText>
 
-
-                    {isOfficial ? (
+                    {isAdminPost ? (
                       <View style={styles.officialBadge}>
-                        <Image
-                          source={OFFICIAL_BADGE_IMG}
-                          style={styles.officialBadgeImage}
-                        />
+                        <Image source={OFFICIAL_BADGE_IMG} style={styles.officialBadgeImage} />
                       </View>
                     ) : null}
                   </View>
@@ -317,7 +304,8 @@ export default function AnnouncementsScreen() {
                   ) : null}
                 </View>
 
-                <ThemedText style={styles.author}>{item.author}</ThemedText>
+                <ThemedText style={styles.author}>{displayAuthor}</ThemedText>
+
                 <ThemedText>{item.text}</ThemedText>
 
                 <View style={styles.actionRow}>
@@ -331,7 +319,7 @@ export default function AnnouncementsScreen() {
                     <TextInput
                       value={replyText}
                       onChangeText={setReplyText}
-                      placeholder="Write a reply..."
+                      placeholder="Write a reply as ADMIN..."
                       placeholderTextColor="#999"
                       style={styles.replyInput}
                       multiline
@@ -346,7 +334,7 @@ export default function AnnouncementsScreen() {
                   <View style={styles.repliesWrap}>
                     {item.replies
                       .slice()
-                      .sort((a, b) => a.createdAt - a.createdAt)
+                      .sort((a, b) => a.createdAt - b.createdAt)
                       .map((r) => (
                         <View key={r.id} style={styles.replyBubble}>
                           <View style={styles.replyTopRow}>
@@ -363,9 +351,7 @@ export default function AnnouncementsScreen() {
                           </View>
 
                           <ThemedText style={styles.replyText}>{r.text}</ThemedText>
-                          <ThemedText style={styles.replyTime}>
-                            {formatTime(r.createdAt)}
-                          </ThemedText>
+                          <ThemedText style={styles.replyTime}>{formatTime(r.createdAt)}</ThemedText>
                         </View>
                       ))}
                   </View>
@@ -378,7 +364,7 @@ export default function AnnouncementsScreen() {
           ListEmptyComponent={
             loading ? null : (
               <ThemedText style={{ opacity: 0.6, marginTop: 12 }}>
-                No posts yet. Type a message above and tap Post.
+                No posts yet. Post an official announcement above.
               </ThemedText>
             )
           }
@@ -391,17 +377,6 @@ export default function AnnouncementsScreen() {
 const styles = StyleSheet.create({
   headerWrap: { gap: 10, marginBottom: 10 },
   subtitle: { opacity: 0.8 },
-
-  typeRow: { flexDirection: "row", gap: 8, alignItems: "center" },
-
-  typePill: {
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-
-  typePillActive: { backgroundColor: "rgba(0,0,0,0.05)" },
 
   composer: { flexDirection: "row", gap: 10, alignItems: "flex-end" },
 
@@ -443,18 +418,17 @@ const styles = StyleSheet.create({
   },
 
   officialBadge: {
-    width: 42,
-    height: 42,
-    borderRadius: 20,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     overflow: "hidden",
     borderWidth: 1,
     opacity: 0.95,
-
-     shadowColor: "#00AEEF",
-  shadowOpacity: 0.9,
-  shadowRadius: 6,
-  shadowOffset: { width: 0, height: 0 },
-  elevation: 6,
+    shadowColor: "#00AEEF",
+    shadowOpacity: 0.9,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
   },
 
   officialBadgeImage: {

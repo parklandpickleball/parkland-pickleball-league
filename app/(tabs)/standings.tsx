@@ -1,6 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ScrollView, Text, View } from 'react-native';
+
+import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
 
 type Division = 'Beginner' | 'Intermediate' | 'Advanced';
 
@@ -26,94 +29,371 @@ type PersistedMatchScore = {
 };
 
 type TeamRow = {
-  division: Division;
+  division: Division; // final “display division”
   team: string;
   gamesPlayed: number; // total games (not matches)
-  wins: number;        // game wins
-  losses: number;      // game losses
+  wins: number; // game wins
+  losses: number; // game losses
   pointsFor: number;
   pointsAgainst: number;
 };
 
-const STORAGE_KEY_MATCHES = 'ppl_matches_v1';
-const STORAGE_KEY_SCORES = 'ppl_scores_v1';
-const ADMIN_UNLOCK_KEY = 'ppl_admin_unlocked';
+// ✅ Saved admin division moves
+type DivisionMove = {
+  id: string;
+  team: string;
+  fromDivision: Division;
+  toDivision: Division;
+  effectiveWeek: number;
+  createdAt: number;
+};
 
 // Week 1 baseline stored here:
 const STORAGE_KEY_BASE = 'ppl_standings_base_v1';
+
+// ✅ Division moves stored here (from your Admin screen)
+const STORAGE_KEY_DIVISION_MOVES = 'ppl_division_moves_v1';
 
 // We will ONLY calculate additions from week >= 2
 const START_WEEK_FOR_AUTOCALC = 2;
 
 const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
 
-function toN(s: string) {
-  const n = parseInt(s || '0', 10);
-  return Number.isFinite(n) ? n : 0;
+// ✅ Baseline teams (same baseline approach as Admin Teams / Scoring)
+const DEFAULT_TEAMS_BY_DIVISION: Record<Division, string[]> = {
+  Advanced: [
+    'Ishai/Greg',
+    'Adam/Jon',
+    'Bradley/Ben',
+    'Peter/Ray',
+    'Andrew/Brent',
+    'Mark D/Craig',
+    'Alex/Anibal',
+    'Radek/Alexi',
+    'Ricky/John',
+    'Brandon/Ikewa',
+    'Andrew/Dan',
+    'Eric/Meir',
+    'David/Guy',
+    'Mark P/Matt O',
+  ],
+  Intermediate: [
+    'Ashley/Julie',
+    'Stephanie/Misty',
+    'Eric/Sunil',
+    'Dan/Relu',
+    'Domencio/Keith',
+    'YG/Haaris',
+    'Nicole/Joshua',
+    'Amy/Nik',
+    'Elaine/Valerie',
+    'Marat/Marta',
+    'Beatriz/Joe',
+    'Alejandro/William',
+  ],
+  Beginner: [
+    'Eric/Tracy',
+    'Rachel/Jaime',
+    'Amy/Ellen',
+    'Lashonda/Lynette',
+    'Michael/JP',
+    'Fran/Scott',
+    'Robert/Adam',
+    'Cynthia/Maureen',
+    'Marina/Sharon',
+  ],
+};
+
+type SupabaseTeamRow = {
+  id: string;
+  created_at: string;
+  division: string;
+  name: string;
+};
+
+type SupabaseMatchRow = {
+  id: string;
+  week: number;
+  division: string;
+  time: string;
+  court: number;
+  team_a: string;
+  team_b: string;
+};
+
+type SupabaseMatchScoreRow = {
+  match_id: string;
+  team_a: any;
+  team_b: any;
+  verified: boolean;
+  verified_by: string | null;
+  verified_at_ms: number | null;
+};
+
+function normalizeName(s: string) {
+  return (s || '').trim();
 }
 
-function isEntered(a: number, b: number) {
-  // If both are 0, assume not entered yet
-  return !(a === 0 && b === 0);
+function uniqSorted(list: string[]) {
+  const set = new Set(list.map((x) => normalizeName(x)).filter(Boolean));
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
-function addRow(map: Map<string, TeamRow>, row: TeamRow) {
-  const key = `${row.division}__${row.team}`;
-  const prev = map.get(key);
-  if (!prev) {
-    map.set(key, row);
-    return;
-  }
-  map.set(key, {
-    ...prev,
-    gamesPlayed: prev.gamesPlayed + row.gamesPlayed,
-    wins: prev.wins + row.wins,
-    losses: prev.losses + row.losses,
-    pointsFor: prev.pointsFor + row.pointsFor,
-    pointsAgainst: prev.pointsAgainst + row.pointsAgainst,
-  });
+function isDivision(v: any): v is Division {
+  return v === 'Beginner' || v === 'Intermediate' || v === 'Advanced';
 }
 
 function pointDiff(row: TeamRow) {
   return row.pointsFor - row.pointsAgainst;
 }
 
+function toN(s: string) {
+  const n = parseInt((s ?? '').toString() || '0', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * ✅ IMPORTANT:
+ * - A score is "entered" if the string is NOT empty.
+ * - A game is "entered" ONLY when BOTH teams have a score for that game.
+ * This prevents blanks from being treated as 0.
+ */
+function isEnteredScore(v: string) {
+  return (v ?? '').toString().trim() !== '';
+}
+function gameEnteredPair(a: string, b: string) {
+  return isEnteredScore(a) && isEnteredScore(b);
+}
+
+function getMaxVerifiedWeek(matches: SavedMatch[], scores: Record<string, PersistedMatchScore>) {
+  let max = 1;
+  for (const m of matches) {
+    const s = scores[m.id];
+    if (!s || !s.verified) continue;
+    if (typeof m.week === 'number' && Number.isFinite(m.week) && m.week > max) {
+      max = m.week;
+    }
+  }
+  return max;
+}
+
+// ✅ Find the team’s division as-of a given week using saved Division Moves
+function getDivisionForTeamAsOfWeek(team: string, asOfWeek: number, moves: DivisionMove[]) {
+  let best: DivisionMove | null = null;
+
+  for (const mv of moves) {
+    if (normalizeName(mv.team) !== normalizeName(team)) continue;
+    if (mv.effectiveWeek > asOfWeek) continue;
+
+    if (!best || mv.effectiveWeek > best.effectiveWeek) {
+      best = mv;
+    }
+  }
+
+  return best ? best.toDivision : null;
+}
+
+function getBaselineDivision(team: string): Division | null {
+  const t = normalizeName(team);
+
+  if (DEFAULT_TEAMS_BY_DIVISION.Advanced.some((x) => normalizeName(x) === t)) return 'Advanced';
+  if (DEFAULT_TEAMS_BY_DIVISION.Intermediate.some((x) => normalizeName(x) === t)) return 'Intermediate';
+  if (DEFAULT_TEAMS_BY_DIVISION.Beginner.some((x) => normalizeName(x) === t)) return 'Beginner';
+  return null;
+}
+
+async function fetchTeamsFromSupabase(): Promise<Record<Division, SupabaseTeamRow[]>> {
+  const url = supabaseRestUrl('teams?select=id,created_at,division,name&order=created_at.asc');
+
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseTeamRow[];
+
+  const grouped: Record<Division, SupabaseTeamRow[]> = {
+    Advanced: [],
+    Intermediate: [],
+    Beginner: [],
+  };
+
+  for (const r of rows) {
+    if (isDivision(r.division)) grouped[r.division].push(r);
+  }
+
+  return grouped;
+}
+
+async function fetchMatchesFromSupabase(): Promise<SavedMatch[]> {
+  const url = supabaseRestUrl(
+    'matches?select=id,week,division,time,court,team_a,team_b&order=week.asc&order=division.asc&order=time.asc&order=court.asc'
+  );
+
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseMatchRow[];
+
+  const out: SavedMatch[] = [];
+  for (const r of rows) {
+    if (!isDivision(r.division)) continue;
+
+    out.push({
+      id: String(r.id),
+      week: Number(r.week),
+      division: r.division,
+      time: String(r.time),
+      court: Number(r.court),
+      teamA: String(r.team_a),
+      teamB: String(r.team_b),
+    });
+  }
+
+  return out;
+}
+
+function asScoreFields(v: any): ScoreFields {
+  // handle strings or numbers defensively
+  const g1 = v?.g1 == null ? '' : String(v.g1);
+  const g2 = v?.g2 == null ? '' : String(v.g2);
+  const g3 = v?.g3 == null ? '' : String(v.g3);
+  return { g1, g2, g3 };
+}
+
+async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedMatchScore>> {
+  const url = supabaseRestUrl(
+    'match_scores?select=match_id,team_a,team_b,verified,verified_by,verified_at_ms'
+  );
+
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseMatchScoreRow[];
+
+  const out: Record<string, PersistedMatchScore> = {};
+  for (const r of rows) {
+    const id = String(r.match_id);
+    out[id] = {
+      matchId: id,
+      teamA: asScoreFields(r.team_a),
+      teamB: asScoreFields(r.team_b),
+      verified: !!r.verified,
+      verifiedBy: r.verified_by ?? null,
+      verifiedAt: typeof r.verified_at_ms === 'number' ? r.verified_at_ms : null,
+    };
+  }
+
+  return out;
+}
+
+// ✅ Internal totals keyed by TEAM ONLY (so records can carry across divisions)
+type TeamTotals = {
+  team: string;
+  // Best guess “original division” (used if no moves exist)
+  originalDivision: Division;
+  gamesPlayed: number;
+  wins: number;
+  losses: number;
+  pointsFor: number;
+  pointsAgainst: number;
+};
+
+function addTotals(
+  map: Map<string, TeamTotals>,
+  add: Omit<TeamTotals, 'originalDivision'> & { originalDivision?: Division }
+) {
+  const key = normalizeName(add.team);
+  if (!key) return;
+
+  const prev = map.get(key);
+  if (!prev) {
+    map.set(key, {
+      team: key,
+      originalDivision: add.originalDivision ?? 'Beginner',
+      gamesPlayed: add.gamesPlayed,
+      wins: add.wins,
+      losses: add.losses,
+      pointsFor: add.pointsFor,
+      pointsAgainst: add.pointsAgainst,
+    });
+    return;
+  }
+
+  map.set(key, {
+    ...prev,
+    originalDivision: prev.originalDivision ?? (add.originalDivision ?? 'Beginner'),
+    gamesPlayed: prev.gamesPlayed + add.gamesPlayed,
+    wins: prev.wins + add.wins,
+    losses: prev.losses + add.losses,
+    pointsFor: prev.pointsFor + add.pointsFor,
+    pointsAgainst: prev.pointsAgainst + add.pointsAgainst,
+  });
+}
+
 export default function StandingsScreen() {
   const [matches, setMatches] = useState<SavedMatch[]>([]);
   const [scores, setScores] = useState<Record<string, PersistedMatchScore>>({});
-  const [isAdmin, setIsAdmin] = useState(false);
 
-  // Week 1 baseline stored in AsyncStorage (admin sets once)
+  // Week 1 baseline + division moves (still local, admin-controlled)
   const [baseRows, setBaseRows] = useState<TeamRow[]>([]);
-  const [importText, setImportText] = useState('');
-  const [showImport, setShowImport] = useState(false);
+  const [divisionMoves, setDivisionMoves] = useState<DivisionMove[]>([]);
 
-  const loadAll = async () => {
-    const [rawMatches, rawScores, rawAdmin, rawBase] = await Promise.all([
-      AsyncStorage.getItem(STORAGE_KEY_MATCHES),
-      AsyncStorage.getItem(STORAGE_KEY_SCORES),
-      AsyncStorage.getItem(ADMIN_UNLOCK_KEY),
-      AsyncStorage.getItem(STORAGE_KEY_BASE),
-    ]);
+  // Teams from Supabase (helps ensure new teams appear even with 0 games)
+  const [dbTeams, setDbTeams] = useState<Record<Division, SupabaseTeamRow[]>>({
+    Advanced: [],
+    Intermediate: [],
+    Beginner: [],
+  });
 
-    // Matches
+  const [teamsLoadError, setTeamsLoadError] = useState<string>('');
+  const [matchesLoadError, setMatchesLoadError] = useState<string>('');
+  const [scoresLoadError, setScoresLoadError] = useState<string>('');
+
+  const refreshTeams = useCallback(async () => {
+    setTeamsLoadError('');
     try {
-      const parsed = rawMatches ? JSON.parse(rawMatches) : [];
-      setMatches(Array.isArray(parsed) ? parsed : []);
-    } catch {
+      const grouped = await fetchTeamsFromSupabase();
+      setDbTeams(grouped);
+    } catch (e: any) {
+      setTeamsLoadError(e?.message || 'Failed to load teams from Supabase.');
+    }
+  }, []);
+
+  const refreshMatches = useCallback(async () => {
+    setMatchesLoadError('');
+    try {
+      const list = await fetchMatchesFromSupabase();
+      setMatches(Array.isArray(list) ? list : []);
+    } catch (e: any) {
       setMatches([]);
+      setMatchesLoadError(e?.message || 'Failed to load matches from Supabase.');
     }
+  }, []);
 
-    // Scores
+  const refreshScores = useCallback(async () => {
+    setScoresLoadError('');
     try {
-      const parsed = rawScores ? JSON.parse(rawScores) : {};
-      setScores(parsed && typeof parsed === 'object' ? parsed : {});
-    } catch {
+      const map = await fetchMatchScoresFromSupabase();
+      setScores(map);
+    } catch (e: any) {
       setScores({});
+      setScoresLoadError(e?.message || 'Failed to load match scores from Supabase.');
     }
+  }, []);
 
-    // Admin
-    setIsAdmin(rawAdmin === 'true');
+  const loadLocalAdminData = useCallback(async () => {
+    const [rawBase, rawMoves] = await Promise.all([
+      AsyncStorage.getItem(STORAGE_KEY_BASE),
+      AsyncStorage.getItem(STORAGE_KEY_DIVISION_MOVES),
+    ]);
 
     // Base Week 1
     try {
@@ -122,63 +402,140 @@ export default function StandingsScreen() {
     } catch {
       setBaseRows([]);
     }
-  };
 
-  useEffect(() => {
-    void loadAll();
+    // Division Moves
+    try {
+      const parsed = rawMoves ? JSON.parse(rawMoves) : [];
+      setDivisionMoves(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      setDivisionMoves([]);
+    }
   }, []);
 
-  const computed = useMemo(() => {
-    // Aggregate Week 2+ from VERIFIED scores only
-    const agg = new Map<string, TeamRow>();
+  useEffect(() => {
+    void refreshTeams();
+    void refreshMatches();
+    void refreshScores();
+    void loadLocalAdminData();
+  }, [refreshTeams, refreshMatches, refreshScores, loadLocalAdminData]);
 
+  useFocusEffect(
+    useCallback(() => {
+      void refreshTeams();
+      void refreshMatches();
+      void refreshScores();
+      void loadLocalAdminData();
+    }, [refreshTeams, refreshMatches, refreshScores, loadLocalAdminData])
+  );
+
+  const supabaseDivisionByTeam = useMemo(() => {
+    const map = new Map<string, Division>();
+    for (const div of DIVISION_ORDER) {
+      for (const row of dbTeams[div] ?? []) {
+        const name = normalizeName(row.name);
+        if (!name) continue;
+        map.set(name, div);
+      }
+    }
+    return map;
+  }, [dbTeams]);
+
+  const computed = useMemo(() => {
+    const totals = new Map<string, TeamTotals>();
+
+    // 0) Ensure ALL known teams exist (even if they have 0 games)
+    const baselineAll = [
+      ...DEFAULT_TEAMS_BY_DIVISION.Advanced,
+      ...DEFAULT_TEAMS_BY_DIVISION.Intermediate,
+      ...DEFAULT_TEAMS_BY_DIVISION.Beginner,
+    ];
+
+    const supaAll = [
+      ...(dbTeams.Advanced ?? []).map((r) => r.name),
+      ...(dbTeams.Intermediate ?? []).map((r) => r.name),
+      ...(dbTeams.Beginner ?? []).map((r) => r.name),
+    ];
+
+    const fromMatchesAll = matches.flatMap((m) => [m.teamA, m.teamB]);
+
+    const allKnownTeams = uniqSorted([...baselineAll, ...supaAll, ...fromMatchesAll]);
+
+    for (const team of allKnownTeams) {
+      const t = normalizeName(team);
+      if (!t) continue;
+
+      const supaDiv = supabaseDivisionByTeam.get(t) ?? null;
+      const baseDiv = getBaselineDivision(t);
+      const hintDiv: Division = supaDiv ?? baseDiv ?? 'Beginner';
+
+      addTotals(totals, {
+        team: t,
+        originalDivision: hintDiv,
+        gamesPlayed: 0,
+        wins: 0,
+        losses: 0,
+        pointsFor: 0,
+        pointsAgainst: 0,
+      });
+    }
+
+    // 1) Seed totals from baseRows (Week 1 baseline)
+    for (const r of baseRows) {
+      addTotals(totals, {
+        team: r.team,
+        originalDivision: r.division,
+        gamesPlayed: r.gamesPlayed,
+        wins: r.wins,
+        losses: r.losses,
+        pointsFor: r.pointsFor,
+        pointsAgainst: r.pointsAgainst,
+      });
+    }
+
+    // 2) Add Week 2+ from VERIFIED scores only (from Supabase)
     for (const m of matches) {
       if (m.week < START_WEEK_FOR_AUTOCALC) continue;
 
       const s = scores[m.id];
       if (!s || !s.verified) continue;
 
-      // Team A points per game
-      const a = [toN(s.teamA.g1), toN(s.teamA.g2), toN(s.teamA.g3)];
-      const b = [toN(s.teamB.g1), toN(s.teamB.g2), toN(s.teamB.g3)];
+      const aRaw = [s.teamA.g1, s.teamA.g2, s.teamA.g3];
+      const bRaw = [s.teamB.g1, s.teamB.g2, s.teamB.g3];
 
       let aWins = 0;
       let bWins = 0;
-      let aPlayed = 0;
-      let bPlayed = 0;
+      let gamesPlayed = 0;
 
       for (let i = 0; i < 3; i++) {
-        const ap = a[i];
-        const bp = b[i];
+        if (!gameEnteredPair(aRaw[i], bRaw[i])) continue;
 
-        if (!isEntered(ap, bp)) continue;
+        gamesPlayed += 1;
 
-        aPlayed += 1;
-        bPlayed += 1;
+        const ap = toN(aRaw[i]);
+        const bp = toN(bRaw[i]);
 
         if (ap > bp) aWins += 1;
         else if (bp > ap) bWins += 1;
-        // ties do nothing (rare, but allowed)
       }
 
-      // points
-      const aPF = a.reduce((sum, n) => sum + n, 0);
-      const bPF = b.reduce((sum, n) => sum + n, 0);
+      // points (sum of all 3 games; blanks contribute 0)
+      const aPF = aRaw.reduce((sum, v) => sum + toN(v), 0);
+      const bPF = bRaw.reduce((sum, v) => sum + toN(v), 0);
 
-      addRow(agg, {
-        division: m.division,
+      addTotals(totals, {
         team: m.teamA,
-        gamesPlayed: aPlayed,
+        originalDivision: m.division,
+        gamesPlayed,
         wins: aWins,
         losses: bWins,
         pointsFor: aPF,
         pointsAgainst: bPF,
       });
 
-      addRow(agg, {
-        division: m.division,
+      addTotals(totals, {
         team: m.teamB,
-        gamesPlayed: bPlayed,
+        originalDivision: m.division,
+        gamesPlayed,
         wins: bWins,
         losses: aWins,
         pointsFor: bPF,
@@ -186,20 +543,33 @@ export default function StandingsScreen() {
       });
     }
 
-    // Merge base + computed
-    const merged = new Map<string, TeamRow>();
+    const asOfWeek = getMaxVerifiedWeek(matches, scores);
 
-    for (const r of baseRows) addRow(merged, r);
-    for (const r of agg.values()) addRow(merged, r);
+    // 3) Convert totals -> TeamRow, assigning FINAL display division via Division Moves
+    const finalRows: TeamRow[] = [];
+    for (const t of totals.values()) {
+      const movedDivision = getDivisionForTeamAsOfWeek(t.team, asOfWeek, divisionMoves);
+      const finalDivision = movedDivision ?? t.originalDivision;
 
-    // group by division
+      finalRows.push({
+        division: finalDivision,
+        team: t.team,
+        gamesPlayed: t.gamesPlayed,
+        wins: t.wins,
+        losses: t.losses,
+        pointsFor: t.pointsFor,
+        pointsAgainst: t.pointsAgainst,
+      });
+    }
+
+    // 4) Group by division + sort
     const byDiv = new Map<Division, TeamRow[]>();
-    for (const r of merged.values()) {
+    for (const r of finalRows) {
       if (!byDiv.has(r.division)) byDiv.set(r.division, []);
       byDiv.get(r.division)!.push(r);
     }
 
-    const sections = DIVISION_ORDER.map((division) => {
+    return DIVISION_ORDER.map((division) => {
       const rows = (byDiv.get(division) ?? []).sort((x, y) => {
         // Teams with 0 games always at bottom
         const xZero = x.gamesPlayed === 0;
@@ -218,143 +588,41 @@ export default function StandingsScreen() {
         // 4) Points Against (lower first)
         if (x.pointsAgainst !== y.pointsAgainst) return x.pointsAgainst - y.pointsAgainst;
 
-        // final stable tie-breaker
         return x.team.localeCompare(y.team);
       });
 
       return { division, rows };
     });
-
-    return sections;
-  }, [matches, scores, baseRows]);
-
-  const saveBase = async (rows: TeamRow[]) => {
-    await AsyncStorage.setItem(STORAGE_KEY_BASE, JSON.stringify(rows));
-    setBaseRows(rows);
-  };
-
-  const tryImportWeek1 = async () => {
-    const raw = (importText || '').trim();
-    if (!raw) {
-      Alert.alert('Nothing to import', 'Paste Week 1 standings JSON first.');
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(raw);
-
-      if (!Array.isArray(parsed)) {
-        Alert.alert('Invalid format', 'Week 1 standings must be a JSON array.');
-        return;
-      }
-
-      // Minimal validation
-      const cleaned: TeamRow[] = parsed.map((r: any) => ({
-        division: r.division,
-        team: String(r.team ?? ''),
-        gamesPlayed: Number(r.gamesPlayed ?? 0) || 0,
-        wins: Number(r.wins ?? 0) || 0,
-        losses: Number(r.losses ?? 0) || 0,
-        pointsFor: Number(r.pointsFor ?? 0) || 0,
-        pointsAgainst: Number(r.pointsAgainst ?? 0) || 0,
-      }));
-
-      const ok = cleaned.every((r) =>
-        (r.division === 'Advanced' || r.division === 'Intermediate' || r.division === 'Beginner') &&
-        r.team.length > 0
-      );
-
-      if (!ok) {
-        Alert.alert(
-          'Invalid rows',
-          'Each row must include: division ("Advanced"/"Intermediate"/"Beginner") and team.'
-        );
-        return;
-      }
-
-      await saveBase(cleaned);
-      Alert.alert('Saved', 'Week 1 baseline standings have been saved.');
-      setShowImport(false);
-      setImportText('');
-    } catch {
-      Alert.alert('Invalid JSON', 'The pasted Week 1 standings is not valid JSON.');
-    }
-  };
-
-  const shouldShowImportUI = isAdmin && baseRows.length === 0;
+  }, [matches, scores, baseRows, divisionMoves, dbTeams, supabaseDivisionByTeam]);
 
   return (
     <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <Text style={{ fontSize: 26, fontWeight: '900', marginBottom: 6 }}>Standings</Text>
 
       <Text style={{ color: '#444', marginBottom: 12 }}>
-        Standings are based on: Week 1 baseline + verified scores from Week {START_WEEK_FOR_AUTOCALC}+.
+        Standings are based on: Week 1 baseline + verified scores from Week {START_WEEK_FOR_AUTOCALC}+ (synced via Supabase).
       </Text>
 
-      {/* Admin Week 1 Import (ONLY if baseline not set yet) */}
-      {shouldShowImportUI ? (
-        <View style={{ borderWidth: 2, borderColor: '#000', borderRadius: 12, padding: 12, marginBottom: 14 }}>
-          <Text style={{ fontWeight: '900', marginBottom: 6 }}>Admin</Text>
+      {teamsLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Teams sync warning: {teamsLoadError}
+        </Text>
+      ) : null}
 
-          <Text style={{ color: '#333', marginBottom: 10 }}>
-            Set Week 1 starting standings one time (JSON). After that, weeks 2+ will add automatically.
-          </Text>
+      {matchesLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Matches sync warning: {matchesLoadError}
+        </Text>
+      ) : null}
 
-          <Pressable
-            onPress={() => setShowImport((v) => !v)}
-            style={{
-              backgroundColor: 'black',
-              paddingVertical: 10,
-              paddingHorizontal: 12,
-              borderRadius: 10,
-              alignSelf: 'flex-start',
-            }}
-          >
-            <Text style={{ color: 'white', fontWeight: '900' }}>
-              {showImport ? 'Hide Week 1 Import' : 'Import Week 1 Standings'}
-            </Text>
-          </Pressable>
-
-          {showImport ? (
-            <View style={{ marginTop: 12 }}>
-              <Text style={{ fontWeight: '800', marginBottom: 6 }}>Paste JSON array here:</Text>
-              <TextInput
-                value={importText}
-                onChangeText={setImportText}
-                multiline
-                placeholder='Example: [{"division":"Advanced","team":"Brandon/Ikewa","gamesPlayed":3,"wins":2,"losses":1,"pointsFor":33,"pointsAgainst":28}]'
-                style={{
-                  borderWidth: 1,
-                  borderColor: '#000',
-                  borderRadius: 10,
-                  padding: 10,
-                  minHeight: 140,
-                  textAlignVertical: 'top',
-                  backgroundColor: 'white',
-                }}
-              />
-
-              <Pressable
-                onPress={() => { void tryImportWeek1(); }}
-                style={{
-                  marginTop: 10,
-                  backgroundColor: 'black',
-                  paddingVertical: 12,
-                  borderRadius: 10,
-                  alignItems: 'center',
-                }}
-              >
-                <Text style={{ color: 'white', fontWeight: '900' }}>
-                  Save Week 1 Baseline
-                </Text>
-              </Pressable>
-            </View>
-          ) : null}
-        </View>
+      {scoresLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Scores sync warning: {scoresLoadError}
+        </Text>
       ) : null}
 
       {computed.every((s) => s.rows.length === 0) ? (
-        <Text>No standings yet. Add Week 1 baseline (admin) and/or verify some scores.</Text>
+        <Text>No standings yet.</Text>
       ) : (
         <View style={{ gap: 16 }}>
           {computed.map((section) => {
@@ -367,15 +635,36 @@ export default function StandingsScreen() {
                 </Text>
 
                 {/* Header row */}
-                <View style={{ flexDirection: 'row', borderWidth: 2, borderColor: '#000', backgroundColor: '#f2f2f2' }}>
-                  <Text style={{ width: 50, padding: 10, fontWeight: '900', textAlign: 'center' }}>#</Text>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    borderWidth: 2,
+                    borderColor: '#000',
+                    backgroundColor: '#f2f2f2',
+                  }}
+                >
+                  <Text style={{ width: 50, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    #
+                  </Text>
                   <Text style={{ flex: 2.2, padding: 10, fontWeight: '900' }}>Team</Text>
-                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>GP</Text>
-                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>W</Text>
-                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>L</Text>
-                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>PF</Text>
-                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>PA</Text>
-                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>DIFF</Text>
+                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    GP
+                  </Text>
+                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    W
+                  </Text>
+                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    L
+                  </Text>
+                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    PF
+                  </Text>
+                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    PA
+                  </Text>
+                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                    DIFF
+                  </Text>
                 </View>
 
                 {/* Rows */}

@@ -1,7 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Picker } from '@react-native-picker/picker';
+import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ScrollView, Text, TextInput, View } from 'react-native';
+
+import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
 
 type Division = 'Beginner' | 'Intermediate' | 'Advanced';
 type DivisionFilter = 'ALL' | Division;
@@ -27,8 +30,6 @@ type PersistedMatchScore = {
   verifiedAt: number | null;
 };
 
-const STORAGE_KEY_MATCHES = 'ppl_matches_v1';
-const STORAGE_KEY_SCORES = 'ppl_scores_v1';
 const STORAGE_KEY_CURRENT_WEEK = 'ppl_current_week_v1';
 
 const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
@@ -40,6 +41,110 @@ const TIMES: string[] = [
   '9:00 PM','9:15 PM','9:30 PM','9:45 PM',
 ];
 
+type SupabaseMatchRow = {
+  id: string;
+  week: number;
+  division: string;
+  time: string;
+  court: number;
+  team_a: string;
+  team_b: string;
+};
+
+type SupabaseMatchScoreRow = {
+  match_id: string;
+  team_a: any;
+  team_b: any;
+  verified: boolean;
+  verified_by: string | null;
+  verified_at_ms: number | null;
+};
+
+function isDivision(v: any): v is Division {
+  return v === 'Beginner' || v === 'Intermediate' || v === 'Advanced';
+}
+
+function safeTrimLower(s: string) {
+  return (s ?? '').toString().trim().toLowerCase();
+}
+
+function safeInt(value: string, fallback: number) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function asScoreFields(v: any): ScoreFields {
+  const g1 = typeof v?.g1 === 'string' ? v.g1 : '';
+  const g2 = typeof v?.g2 === 'string' ? v.g2 : '';
+  const g3 = typeof v?.g3 === 'string' ? v.g3 : '';
+  return { g1, g2, g3 };
+}
+
+async function fetchMatchesFromSupabase(): Promise<SavedMatch[]> {
+  const url = supabaseRestUrl(
+    'matches?select=id,week,division,time,court,team_a,team_b&order=week.asc&order=division.asc&order=time.asc&order=court.asc'
+  );
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseMatchRow[];
+
+  const out: SavedMatch[] = [];
+  for (const r of rows) {
+    if (!isDivision(r.division)) continue;
+
+    out.push({
+      id: String(r.id),
+      week: Number(r.week),
+      division: r.division,
+      time: String(r.time),
+      court: Number(r.court),
+      teamA: String(r.team_a),
+      teamB: String(r.team_b),
+    });
+  }
+
+  return out;
+}
+
+async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedMatchScore>> {
+  const url = supabaseRestUrl('match_scores?select=match_id,team_a,team_b,verified,verified_by,verified_at_ms');
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseMatchScoreRow[];
+
+  const out: Record<string, PersistedMatchScore> = {};
+  for (const r of rows) {
+    const id = String(r.match_id);
+    out[id] = {
+      matchId: id,
+      teamA: asScoreFields(r.team_a),
+      teamB: asScoreFields(r.team_b),
+      verified: !!r.verified,
+      verifiedBy: r.verified_by ?? null,
+      verifiedAt: typeof r.verified_at_ms === 'number' ? r.verified_at_ms : null,
+    };
+  }
+  return out;
+}
+
 function toN(s: string) {
   const n = parseInt(s || '0', 10);
   return Number.isFinite(n) ? n : 0;
@@ -49,78 +154,80 @@ function totalOf(fields: ScoreFields) {
   return toN(fields.g1) + toN(fields.g2) + toN(fields.g3);
 }
 
-function gamesEnteredCount(teamA: ScoreFields, teamB: ScoreFields) {
-  const a = [toN(teamA.g1), toN(teamA.g2), toN(teamA.g3)];
-  const b = [toN(teamB.g1), toN(teamB.g2), toN(teamB.g3)];
+// ✅ Results completion logic should match Scoring (empty string = not entered; "0" counts as entered)
+function isEnteredScore(v: string) {
+  return (v ?? '').trim() !== '';
+}
+function gameEnteredPair(a: string, b: string) {
+  return isEnteredScore(a) && isEnteredScore(b);
+}
+function enteredGamesCount(teamA: ScoreFields, teamB: ScoreFields) {
+  const a = [teamA.g1, teamA.g2, teamA.g3];
+  const b = [teamB.g1, teamB.g2, teamB.g3];
   let entered = 0;
-
   for (let i = 0; i < 3; i++) {
-    if (a[i] === 0 && b[i] === 0) continue;
+    if (!gameEnteredPair(a[i], b[i])) continue;
     entered += 1;
   }
   return entered;
-}
-
-function safeTrimLower(s: string) {
-  return (s ?? '').toString().trim().toLowerCase();
 }
 
 export default function ResultsScreen() {
   const [matches, setMatches] = useState<SavedMatch[]>([]);
   const [persisted, setPersisted] = useState<Record<string, PersistedMatchScore>>({});
 
+  const [loadError, setLoadError] = useState<string>('');
+
   // Filters
   const [divisionFilter, setDivisionFilter] = useState<DivisionFilter>('ALL');
   const [weekFilter, setWeekFilter] = useState<string>(''); // '' means not initialized yet
   const [search, setSearch] = useState<string>('');
 
-  const loadAll = useCallback(async () => {
-    // Matches
-    const rawMatches = await AsyncStorage.getItem(STORAGE_KEY_MATCHES);
-    let parsedMatches: SavedMatch[] = [];
+  const refreshAll = useCallback(async () => {
+    setLoadError('');
     try {
-      const p = rawMatches ? JSON.parse(rawMatches) : [];
-      parsedMatches = Array.isArray(p) ? p : [];
-    } catch {
-      parsedMatches = [];
-    }
-    setMatches(parsedMatches);
+      const [m, s] = await Promise.all([
+        fetchMatchesFromSupabase(),
+        fetchMatchScoresFromSupabase(),
+      ]);
 
-    // Scores
-    const rawScores = await AsyncStorage.getItem(STORAGE_KEY_SCORES);
-    let parsedScores: Record<string, PersistedMatchScore> = {};
-    try {
-      const p = rawScores ? JSON.parse(rawScores) : {};
-      parsedScores = p && typeof p === 'object' ? p : {};
-    } catch {
-      parsedScores = {};
-    }
-    setPersisted(parsedScores);
+      setMatches(Array.isArray(m) ? m : []);
+      setPersisted(s && typeof s === 'object' ? s : {});
 
-    // Init week filter (only once)
-    if (weekFilter === '') {
-      const savedCurrentWeekRaw = await AsyncStorage.getItem(STORAGE_KEY_CURRENT_WEEK);
-      const savedCurrentWeek = savedCurrentWeekRaw ? parseInt(String(savedCurrentWeekRaw), 10) : NaN;
+      // Init week filter (only once)
+      if (weekFilter === '') {
+        const savedCurrentWeekRaw = await AsyncStorage.getItem(STORAGE_KEY_CURRENT_WEEK);
+        const savedCurrentWeek = savedCurrentWeekRaw ? parseInt(String(savedCurrentWeekRaw), 10) : NaN;
 
-      const weeks = Array.from(new Set(parsedMatches.map((m) => m.week)))
-        .filter((n) => Number.isFinite(n))
-        .sort((a, b) => a - b);
+        const weeks = Array.from(new Set((m ?? []).map((x) => x.week)))
+          .filter((n) => Number.isFinite(n))
+          .sort((a, b) => a - b);
 
-      const newestWeek = weeks.length ? weeks[weeks.length - 1] : 1;
+        const newestWeek = weeks.length ? weeks[weeks.length - 1] : 1;
 
-      const initial =
-        Number.isFinite(savedCurrentWeek) && savedCurrentWeek > 0
-          ? savedCurrentWeek
-          : newestWeek;
+        const initial =
+          Number.isFinite(savedCurrentWeek) && savedCurrentWeek > 0
+            ? savedCurrentWeek
+            : newestWeek;
 
-      setWeekFilter(String(initial));
+        setWeekFilter(String(initial));
+      }
+    } catch (e: any) {
+      setMatches([]);
+      setPersisted({});
+      setLoadError(e?.message || 'Failed to load Results from Supabase.');
     }
   }, [weekFilter]);
 
   useEffect(() => {
-    void loadAll();
-    // also reload on web tab switching is not always reliable; but this is fine for now
-  }, [loadAll]);
+    void refreshAll();
+  }, [refreshAll]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshAll();
+    }, [refreshAll])
+  );
 
   const allWeeksSorted = useMemo(() => {
     const weeks = Array.from(new Set(matches.map((m) => m.week)))
@@ -168,7 +275,6 @@ export default function ResultsScreen() {
     });
   }, [matches, divisionFilter, weekFilter, search]);
 
-  // Group by division, but only show divisions that have rows after filter
   const grouped = useMemo(() => {
     const map = new Map<Division, SavedMatch[]>();
     for (const m of filteredMatches) {
@@ -187,8 +293,14 @@ export default function ResultsScreen() {
       <Text style={{ fontSize: 24, fontWeight: '900', marginBottom: 6 }}>Results</Text>
 
       <Text style={{ color: '#444', marginBottom: 12 }}>
-        Read-only league results (scheduled matches + saved scores).
+        Read-only league results (Supabase matches + saved scores).
       </Text>
+
+      {loadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 12 }}>
+          Sync warning: {loadError}
+        </Text>
+      ) : null}
 
       {/* Division dropdown */}
       <Text style={{ fontWeight: '800', marginBottom: 6 }}>Division</Text>
@@ -261,12 +373,8 @@ export default function ResultsScreen() {
                   const aTotal = totalOf(aFields);
                   const bTotal = totalOf(bFields);
 
-                  const enteredGames = p ? gamesEnteredCount(aFields, bFields) : 0;
+                  const enteredGames = p ? enteredGamesCount(aFields, bFields) : 0;
 
-                  // Labels:
-                  // - none if nothing entered
-                  // - PARTIAL if 1-2 games entered
-                  // - COMPLETED if 3 games entered
                   const label =
                     enteredGames === 0
                       ? null

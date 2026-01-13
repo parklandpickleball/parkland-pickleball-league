@@ -10,26 +10,22 @@ const PLAYER_NAME_KEY = 'ppl_selected_player_name';   // e.g. "Ishai" or "Greg"
 export default function TeamSelectScreen() {
   const router = useRouter();
 
-  // When user taps a team, we store it here and ask which player they are.
   const [pendingTeam, setPendingTeam] = useState<string | null>(null);
 
   const pendingPlayers = useMemo(() => {
     if (!pendingTeam) return null;
 
-    // Team format is "Player1/Player2"
     const parts = pendingTeam.split('/').map((s) => s.trim()).filter(Boolean);
     if (parts.length >= 2) return { p1: parts[0], p2: parts[1] };
 
-    // Fallback if somehow a team name isn't formatted with "/"
     return { p1: pendingTeam, p2: '' };
   }, [pendingTeam]);
 
   const beginChooseTeam = (team: string) => setPendingTeam(team);
 
+  // ✅ Always route through root to guarantee valid tab context
   const goIntoApp = () => {
-    // ✅ On web, the "(tabs)" group is NOT part of the URL.
-    // So we navigate to "/schedule" (which is the tabs schedule screen).
-    router.replace('/schedule');
+    router.replace('/');
   };
 
   const saveSelection = async (team: string, playerIndex: '1' | '2', playerName: string) => {
@@ -70,7 +66,6 @@ export default function TeamSelectScreen() {
         You will only be able to enter scores for games your team is playing.
       </Text>
 
-      {/* Player picker prompt (shows only after a team is tapped) */}
       {pendingTeam && pendingPlayers ? (
         <View style={styles.pickerBox}>
           <Text style={styles.pickerTitle}>Who are you on this team?</Text>
@@ -98,7 +93,6 @@ export default function TeamSelectScreen() {
         </View>
       ) : null}
 
-      {/* Advanced Division */}
       <Text style={styles.division}>Advanced Division</Text>
       {[
         'Ishai/Greg',
@@ -121,7 +115,6 @@ export default function TeamSelectScreen() {
         </Pressable>
       ))}
 
-      {/* Intermediate Division */}
       <Text style={styles.division}>Intermediate Division</Text>
       {[
         'Ashley/Julie',
@@ -142,7 +135,6 @@ export default function TeamSelectScreen() {
         </Pressable>
       ))}
 
-      {/* Beginner Division */}
       <Text style={styles.division}>Beginner Division</Text>
       {[
         'Eric/Tracy',

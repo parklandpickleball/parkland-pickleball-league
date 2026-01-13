@@ -4,6 +4,8 @@ import { useFocusEffect } from 'expo-router';
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 
+import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
+
 type Division = 'Beginner' | 'Intermediate' | 'Advanced';
 
 type SavedMatch = {
@@ -16,11 +18,9 @@ type SavedMatch = {
   teamB: string;
 };
 
-const STORAGE_KEY_MATCHES = 'ppl_matches_v1';
 const STORAGE_KEY_SELECTED_TEAM = 'ppl_selected_team';
 const STORAGE_KEY_SELECTED_PLAYER_NAME = 'ppl_selected_player_name';
 const ADMIN_UNLOCK_KEY = 'ppl_admin_unlocked';
-const STORAGE_KEY_SCORES = 'ppl_scores_v1';
 const STORAGE_KEY_CURRENT_WEEK = 'ppl_current_week_v1';
 
 type ScoreFields = { g1: string; g2: string; g3: string };
@@ -31,7 +31,7 @@ type PersistedMatchScore = {
   teamB: ScoreFields;
   verified: boolean;
   verifiedBy: string | null;
-  verifiedAt: number | null;
+  verifiedAt: number | null; // ✅ local-only (NOT stored in Supabase right now)
 };
 
 const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
@@ -42,6 +42,220 @@ const TIMES: string[] = [
   '8:00 PM','8:15 PM','8:30 PM','8:45 PM',
   '9:00 PM','9:15 PM','9:30 PM','9:45 PM',
 ];
+
+// ✅ Baseline teams (same baseline approach as Admin Teams)
+const DEFAULT_TEAMS_BY_DIVISION: Record<Division, string[]> = {
+  Advanced: [
+    'Ishai/Greg',
+    'Adam/Jon',
+    'Bradley/Ben',
+    'Peter/Ray',
+    'Andrew/Brent',
+    'Mark D/Craig',
+    'Alex/Anibal',
+    'Radek/Alexi',
+    'Ricky/John',
+    'Brandon/Ikewa',
+    'Andrew/Dan',
+    'Eric/Meir',
+    'David/Guy',
+    'Mark P/Matt O',
+  ],
+  Intermediate: [
+    'Ashley/Julie',
+    'Stephanie/Misty',
+    'Eric/Sunil',
+    'Dan/Relu',
+    'Domencio/Keith',
+    'YG/Haaris',
+    'Nicole/Joshua',
+    'Amy/Nik',
+    'Elaine/Valerie',
+    'Marat/Marta',
+    'Beatriz/Joe',
+    'Alejandro/William',
+  ],
+  Beginner: [
+    'Eric/Tracy',
+    'Rachel/Jaime',
+    'Amy/Ellen',
+    'Lashonda/Lynette',
+    'Michael/JP',
+    'Fran/Scott',
+    'Robert/Adam',
+    'Cynthia/Maureen',
+    'Marina/Sharon',
+  ],
+};
+
+type SupabaseTeamRow = {
+  id: string;
+  created_at: string;
+  division: string;
+  name: string;
+};
+
+type SupabaseMatchRow = {
+  id: string;
+  week: number;
+  division: string;
+  time: string;
+  court: number;
+  team_a: string;
+  team_b: string;
+  created_at_ms?: number | null;
+};
+
+type SupabaseMatchScoreRow = {
+  match_id: string;
+  team_a: any;
+  team_b: any;
+  verified: boolean;
+  verified_by: string | null;
+  // ✅ DO NOT include verified_at / verified_at_ms here because your table doesn't have it
+};
+
+function normalizeName(s: string) {
+  return (s || '').trim();
+}
+
+function uniqSorted(list: string[]) {
+  const set = new Set(list.map((x) => normalizeName(x)).filter(Boolean));
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+function isDivision(v: any): v is Division {
+  return v === 'Beginner' || v === 'Intermediate' || v === 'Advanced';
+}
+
+async function fetchTeamsFromSupabase(): Promise<Record<Division, SupabaseTeamRow[]>> {
+  const url = supabaseRestUrl('teams?select=id,created_at,division,name&order=created_at.asc');
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseTeamRow[];
+
+  const grouped: Record<Division, SupabaseTeamRow[]> = {
+    Advanced: [],
+    Intermediate: [],
+    Beginner: [],
+  };
+
+  for (const r of rows) {
+    if (isDivision(r.division)) grouped[r.division].push(r);
+  }
+
+  return grouped;
+}
+
+async function fetchMatchesFromSupabase(): Promise<SavedMatch[]> {
+  const url = supabaseRestUrl(
+    'matches?select=id,week,division,time,court,team_a,team_b,created_at_ms&order=week.asc&order=division.asc&order=time.asc&order=court.asc'
+  );
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseMatchRow[];
+
+  const out: SavedMatch[] = [];
+  for (const r of rows) {
+    if (!isDivision(r.division)) continue;
+
+    out.push({
+      id: String(r.id),
+      week: Number(r.week),
+      division: r.division,
+      time: String(r.time),
+      court: Number(r.court),
+      teamA: String(r.team_a),
+      teamB: String(r.team_b),
+    });
+  }
+
+  return out;
+}
+
+function asScoreFields(v: any): ScoreFields {
+  const g1 = typeof v?.g1 === 'string' ? v.g1 : '';
+  const g2 = typeof v?.g2 === 'string' ? v.g2 : '';
+  const g3 = typeof v?.g3 === 'string' ? v.g3 : '';
+  return { g1, g2, g3 };
+}
+
+async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedMatchScore>> {
+  // ✅ FIX: remove verified_at/verified_at_ms from select because your table doesn't have it
+  const url = supabaseRestUrl('match_scores?select=match_id,team_a,team_b,verified,verified_by');
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseMatchScoreRow[];
+
+  const out: Record<string, PersistedMatchScore> = {};
+  for (const r of rows) {
+    const id = String(r.match_id);
+    out[id] = {
+      matchId: id,
+      teamA: asScoreFields(r.team_a),
+      teamB: asScoreFields(r.team_b),
+      verified: !!r.verified,
+      verifiedBy: r.verified_by ?? null,
+      verifiedAt: null, // ✅ no DB column for this right now
+    };
+  }
+  return out;
+}
+
+async function upsertMatchScoreToSupabase(row: PersistedMatchScore) {
+  const url = supabaseRestUrl('match_scores');
+
+  // ✅ FIX: remove verified_at/verified_at_ms from payload because your table doesn't have it
+  const payload = {
+    match_id: row.matchId,
+    team_a: row.teamA,
+    team_b: row.teamB,
+    verified: row.verified,
+    verified_by: row.verifiedBy,
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...supabaseHeaders(),
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase UPSERT failed: ${res.status} ${txt}`);
+  }
+}
 
 function sanitizeAndClampScore(input: string) {
   const digits = (input ?? '').replace(/[^\d]/g, '');
@@ -136,7 +350,6 @@ function gameWins(teamA: ScoreFields, teamB: ScoreFields) {
   let gamesEntered = 0;
 
   for (let i = 0; i < 3; i++) {
-    // ✅ only count a game if BOTH scores are entered
     if (!gameEnteredPair(aRaw[i], bRaw[i])) continue;
 
     gamesEntered += 1;
@@ -155,7 +368,6 @@ function statusLine(teamAName: string, teamBName: string, teamA: ScoreFields, te
   const aTotal = totalOf(teamA);
   const bTotal = totalOf(teamB);
 
-  // If literally nothing is entered for any game for either team, show nothing
   const anyEntered =
     isEnteredScore(teamA.g1) || isEnteredScore(teamA.g2) || isEnteredScore(teamA.g3) ||
     isEnteredScore(teamB.g1) || isEnteredScore(teamB.g2) || isEnteredScore(teamB.g3);
@@ -182,8 +394,6 @@ function statusLine(teamAName: string, teamBName: string, teamA: ScoreFields, te
 
 /**
  * ✅ COMPLETION must be based ONLY on PERSISTED (saved) values.
- * COMPLETED only when G1/G2/G3 are entered for BOTH teams.
- * PARTIAL if at least one complete game exists but not all 3.
  */
 function persistedCompletionLabel(p?: PersistedMatchScore) {
   if (!p) return null as null | 'PARTIAL' | 'COMPLETED';
@@ -210,21 +420,53 @@ export default function ScoringScreen() {
   const [myPlayerName, setMyPlayerName] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
-  // Draft edits. IMPORTANT: keep even if fields are ''.
+  // Draft edits (local only)
   const [scores, setScores] = useState<Record<string, ScoreFields>>({});
+  // ✅ Persisted scores now come from Supabase
   const [persisted, setPersisted] = useState<Record<string, PersistedMatchScore>>({});
 
   const [selectedWeek, setSelectedWeek] = useState<number>(1);
   const [adminPartialOnly, setAdminPartialOnly] = useState<boolean>(false);
 
-  const loadMatches = useCallback(async () => {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY_MATCHES);
-    if (!raw) return setMatches([]);
+  const [dbTeams, setDbTeams] = useState<Record<Division, SupabaseTeamRow[]>>({
+    Advanced: [],
+    Intermediate: [],
+    Beginner: [],
+  });
+
+  const [teamsLoadError, setTeamsLoadError] = useState<string>('');
+  const [scoresLoadError, setScoresLoadError] = useState<string>('');
+  const [matchesLoadError, setMatchesLoadError] = useState<string>('');
+
+  const refreshTeams = useCallback(async () => {
+    setTeamsLoadError('');
     try {
-      const parsed = JSON.parse(raw);
-      setMatches(Array.isArray(parsed) ? parsed : []);
-    } catch {
+      const grouped = await fetchTeamsFromSupabase();
+      setDbTeams(grouped);
+    } catch (e: any) {
+      setTeamsLoadError(e?.message || 'Failed to load teams from Supabase.');
+    }
+  }, []);
+
+  const refreshMatches = useCallback(async () => {
+    setMatchesLoadError('');
+    try {
+      const list = await fetchMatchesFromSupabase();
+      setMatches(Array.isArray(list) ? list : []);
+    } catch (e: any) {
       setMatches([]);
+      setMatchesLoadError(e?.message || 'Failed to load matches from Supabase.');
+    }
+  }, []);
+
+  const refreshPersistedScores = useCallback(async () => {
+    setScoresLoadError('');
+    try {
+      const map = await fetchMatchScoresFromSupabase();
+      setPersisted(map);
+    } catch (e: any) {
+      setPersisted({});
+      setScoresLoadError(e?.message || 'Failed to load match scores from Supabase.');
     }
   }, []);
 
@@ -240,17 +482,6 @@ export default function ScoringScreen() {
     setIsAdmin(unlocked === 'true');
   }, []);
 
-  const loadScores = useCallback(async () => {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY_SCORES);
-    if (!raw) return setPersisted({});
-    try {
-      const parsed = JSON.parse(raw);
-      setPersisted(parsed && typeof parsed === 'object' ? parsed : {});
-    } catch {
-      setPersisted({});
-    }
-  }, []);
-
   const loadCurrentWeek = useCallback(async () => {
     const raw = await AsyncStorage.getItem(STORAGE_KEY_CURRENT_WEEK);
     const w = safeInt(raw ?? '0', 0);
@@ -258,30 +489,50 @@ export default function ScoringScreen() {
   }, []);
 
   useEffect(() => {
-    loadMatches();
+    refreshTeams();
+    refreshMatches();
+    refreshPersistedScores();
     loadIdentity();
     loadAdmin();
-    loadScores();
     loadCurrentWeek();
-  }, [loadMatches, loadIdentity, loadAdmin, loadScores, loadCurrentWeek]);
+  }, [refreshTeams, refreshMatches, refreshPersistedScores, loadIdentity, loadAdmin, loadCurrentWeek]);
 
   useFocusEffect(
     useCallback(() => {
+      refreshTeams();
+      refreshMatches();
+      refreshPersistedScores();
       loadIdentity();
       loadAdmin();
-      loadMatches();
-      loadScores();
       loadCurrentWeek();
-    }, [loadIdentity, loadAdmin, loadMatches, loadScores, loadCurrentWeek])
+    }, [refreshTeams, refreshMatches, refreshPersistedScores, loadIdentity, loadAdmin, loadCurrentWeek])
   );
+
+  const knownTeamsSet = useMemo(() => {
+    const baseline = [
+      ...DEFAULT_TEAMS_BY_DIVISION.Advanced,
+      ...DEFAULT_TEAMS_BY_DIVISION.Intermediate,
+      ...DEFAULT_TEAMS_BY_DIVISION.Beginner,
+    ];
+
+    const supa = [
+      ...(dbTeams.Advanced ?? []).map((r) => r.name),
+      ...(dbTeams.Intermediate ?? []).map((r) => r.name),
+      ...(dbTeams.Beginner ?? []).map((r) => r.name),
+    ];
+
+    const fromMatches = matches.flatMap((m) => [m.teamA, m.teamB]);
+
+    return new Set(uniqSorted([...baseline, ...supa, ...fromMatches]));
+  }, [dbTeams, matches]);
 
   const canEditMatch = (m: SavedMatch) => {
     if (isAdmin) return true;
     if (!myTeam) return false;
-    return m.teamA === myTeam || m.teamB === myTeam;
+    const mine = normalizeName(myTeam);
+    return normalizeName(m.teamA) === mine || normalizeName(m.teamB) === mine;
   };
 
-  // Merge persisted + draft. Draft overrides persisted even if draft value is ''.
   const getFields = (matchId: string, teamName: string, persistedFields?: ScoreFields): ScoreFields => {
     const key = getTeamKey(matchId, teamName);
     const draft = scores[key];
@@ -316,11 +567,6 @@ export default function ScoringScreen() {
 
       return { ...prev, [key]: next };
     });
-  };
-
-  const persistScores = async (nextPersisted: Record<string, PersistedMatchScore>) => {
-    await AsyncStorage.setItem(STORAGE_KEY_SCORES, JSON.stringify(nextPersisted));
-    setPersisted(nextPersisted);
   };
 
   const confirmOnWeb = (message: string) => {
@@ -361,30 +607,46 @@ export default function ScoringScreen() {
     ].filter(Boolean).join('\n');
 
     const doSave = async () => {
-      const next: Record<string, PersistedMatchScore> = {
-        ...persisted,
-        [m.id]: {
-          matchId: m.id,
-          teamA: teamAFields,
-          teamB: teamBFields,
-          verified: true,
-          verifiedBy: by,
-          verifiedAt: Date.now(),
-        },
+      const row: PersistedMatchScore = {
+        matchId: m.id,
+        teamA: teamAFields,
+        teamB: teamBFields,
+        verified: true,
+        verifiedBy: by,
+        verifiedAt: Date.now(), // ✅ local-only for UI
       };
-      await persistScores(next);
+
+      await upsertMatchScoreToSupabase(row);
+
+      // ✅ Refresh persisted from Supabase after saving
+      await refreshPersistedScores();
     };
 
     if (Platform.OS === 'web') {
       const ok = confirmOnWeb(summary);
       if (!ok) return;
-      await doSave();
+      try {
+        await doSave();
+      } catch (e: any) {
+        Alert.alert('Save failed', e?.message || 'Could not save scores to Supabase.');
+      }
       return;
     }
 
     Alert.alert('Verify & Save', summary, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Yes, Verify & Save', onPress: () => { void doSave(); } },
+      {
+        text: 'Yes, Verify & Save',
+        onPress: () => {
+          void (async () => {
+            try {
+              await doSave();
+            } catch (e: any) {
+              Alert.alert('Save failed', e?.message || 'Could not save scores to Supabase.');
+            }
+          })();
+        },
+      },
     ]);
   };
 
@@ -401,14 +663,13 @@ export default function ScoringScreen() {
     const teamFiltered = isAdmin
       ? base
       : myTeam
-        ? base.filter((m) => m.teamA === myTeam || m.teamB === myTeam)
+        ? base.filter((m) => normalizeName(m.teamA) === normalizeName(myTeam) || normalizeName(m.teamB) === normalizeName(myTeam))
         : [];
 
     if (!isAdmin) return teamFiltered;
 
     if (!adminPartialOnly) return teamFiltered;
 
-    // ✅ Admin "partial only" now means: NOT COMPLETED based on persisted saved games
     return teamFiltered.filter((m) => {
       const p = persisted[m.id];
       return persistedCompletionLabel(p) !== 'COMPLETED';
@@ -435,6 +696,12 @@ export default function ScoringScreen() {
       });
   }, [visibleMatches]);
 
+  const myTeamUnknown = useMemo(() => {
+    if (!myTeam) return false;
+    if (knownTeamsSet.size === 0) return false;
+    return !knownTeamsSet.has(normalizeName(myTeam));
+  }, [myTeam, knownTeamsSet]);
+
   return (
     <ScrollView contentContainerStyle={{ padding: 16 }}>
       <Text style={{ fontSize: 24, fontWeight: '900', marginBottom: 6 }}>Scoring</Text>
@@ -448,6 +715,30 @@ export default function ScoringScreen() {
               : `You are: ${myTeam}`
             : 'Pick your team first to enter scores.'}
       </Text>
+
+      {teamsLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Teams sync warning: {teamsLoadError}
+        </Text>
+      ) : null}
+
+      {matchesLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Matches sync warning: {matchesLoadError}
+        </Text>
+      ) : null}
+
+      {scoresLoadError ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Scores sync warning: {scoresLoadError}
+        </Text>
+      ) : null}
+
+      {myTeamUnknown ? (
+        <Text style={{ color: '#b00020', fontWeight: '900', marginBottom: 10 }}>
+          Team sync warning: Your selected team is not in the current Supabase/baseline team list. (Scoring still works, but confirm your team selection.)
+        </Text>
+      ) : null}
 
       <Text style={{ fontWeight: '900', marginBottom: 6 }}>Week</Text>
       <View style={{ borderWidth: 1, borderColor: '#ccc', borderRadius: 10, marginBottom: 10 }}>
@@ -506,7 +797,6 @@ export default function ScoringScreen() {
                   const verifiedLabel =
                     p?.verified ? `Verified by ${p.verifiedBy ?? 'UNKNOWN'}` : 'Not verified yet';
 
-                  // ✅ COMPLETED/PARTIAL is based ONLY on persisted saved values (NOT typing)
                   const badge = persistedCompletionLabel(p);
 
                   const completionNode =
