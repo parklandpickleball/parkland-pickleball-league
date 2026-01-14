@@ -56,8 +56,9 @@ export default function AdminAnnouncementsScreen() {
     try {
       setLoading(true);
 
+      // ✅ ADMIN feed shows BOTH admin + community announcements
       const aUrl = supabaseRestUrl(
-        "/announcements?select=*&scope=eq.admin&order=created_at.desc"
+        "/announcements?select=*&scope=in.(admin,community)&order=created_at.desc"
       );
       const aRes = await fetch(aUrl, { headers: supabaseHeaders() });
       const aJson = await aRes.json();
@@ -144,36 +145,35 @@ export default function AdminAnnouncementsScreen() {
   }
 
   async function onPost() {
-  const trimmed = text.trim();
-  if (!trimmed) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
 
-  const res = await fetch(supabaseRestUrl("/announcements"), {
-    method: "POST",
-    headers: supabaseHeaders({ Prefer: "return=representation" }),
-    body: JSON.stringify({
-      scope: "admin",
-      author: currentAuthor,
-      message: trimmed,
-    }),
-  });
+    const res = await fetch(supabaseRestUrl("/announcements"), {
+      method: "POST",
+      headers: supabaseHeaders({ Prefer: "return=representation" }),
+      body: JSON.stringify({
+        scope: "admin",
+        author: currentAuthor,
+        message: trimmed,
+      }),
+    });
 
-  // ✅ SHOW STATUS EVERY TIME (so we know what's happening)
-  Alert.alert("POST status", String(res.status));
+    // ✅ SHOW STATUS EVERY TIME (so we know what's happening)
+    Alert.alert("POST status", String(res.status));
 
-  const json = await res.json().catch(() => null);
+    const json = await res.json().catch(() => null);
 
-  if (!res.ok) {
-    Alert.alert("Post failed", json?.message || "Unknown error");
-    return;
+    if (!res.ok) {
+      Alert.alert("Post failed", json?.message || "Unknown error");
+      return;
+    }
+
+    setText("");
+    await loadAll();
+
+    // ✅ ONLY admin-posted announcements trigger a notification
+    await triggerAdminPostNotification(trimmed);
   }
-
-  setText("");
-  await loadAll();
-
-  // ✅ ONLY admin-posted announcements trigger a notification
-  await triggerAdminPostNotification(trimmed);
-}
-
 
   async function onDeletePost(post: Post) {
     const doDelete = async () => {
@@ -311,7 +311,7 @@ export default function AdminAnnouncementsScreen() {
           ListHeaderComponent={header}
           contentContainerStyle={{ padding: 16 }}
           renderItem={({ item }) => {
-            const isAdminPost = item.author === "ADMIN";
+            const isAdminPost = item.scope === "admin";
             const headerLabel = isAdminPost ? "ADMIN" : "COMMUNITY";
             const displayAuthor = isAdminPost ? "ADMIN" : item.author;
 
@@ -332,10 +332,7 @@ export default function AdminAnnouncementsScreen() {
                   </View>
 
                   {canDeletePost(item) ? (
-                    <Pressable
-                      onPress={() => onDeletePost(item)}
-                      style={styles.deletePill}
-                    >
+                    <Pressable onPress={() => onDeletePost(item)} style={styles.deletePill}>
                       <ThemedText>Delete</ThemedText>
                     </Pressable>
                   ) : null}
@@ -346,10 +343,7 @@ export default function AdminAnnouncementsScreen() {
                 <ThemedText>{item.message}</ThemedText>
 
                 <View style={styles.actionRow}>
-                  <Pressable
-                    onPress={() => startReply(item.id)}
-                    style={styles.replyPill}
-                  >
+                  <Pressable onPress={() => startReply(item.id)} style={styles.replyPill}>
                     <ThemedText>
                       {replyingToPostId === item.id ? "Cancel" : "Reply"}
                     </ThemedText>
