@@ -11,7 +11,7 @@ const STORAGE_KEY_DIVISION_MOVES = 'ppl_division_moves_v1';
 type Division = 'Beginner' | 'Intermediate' | 'Advanced';
 
 type DivisionMove = {
-  id: string;
+  id: string; // local UI id (not Supabase id)
   team: string;
   fromDivision: Division;
   toDivision: Division;
@@ -74,9 +74,8 @@ function uid() {
 
 function sortMoves(list: DivisionMove[]) {
   return [...list].sort((a, b) => {
-    if (a.effectiveWeek !== b.effectiveWeek) return a.effectiveWeek - b.effectiveWeek;
-    if (a.toDivision !== b.toDivision) return a.toDivision.localeCompare(b.toDivision);
-    return a.createdAt - b.createdAt;
+    // newest first feels better for admin
+    return b.createdAt - a.createdAt;
   });
 }
 
@@ -102,8 +101,7 @@ export default function AdminDivisionMovesScreen() {
   const [movesLoaded, setMovesLoaded] = useState(false);
 
   // ✅ Team dropdown value (no typing)
-  const [moveTeam, setMoveTeam] = useState<string>(''); // empty = not chosen yet
-
+  const [moveTeam, setMoveTeam] = useState<string>('');
   const [moveFrom, setMoveFrom] = useState<Division>('Intermediate');
   const [moveTo, setMoveTo] = useState<Division>('Advanced');
   const [moveWeek, setMoveWeek] = useState<string>('1');
@@ -116,12 +114,37 @@ export default function AdminDivisionMovesScreen() {
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, []);
 
+  // ✅ Always load from Supabase (source of truth)
   const loadMoves = useCallback(async () => {
     try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY_DIVISION_MOVES);
-      const parsed = raw ? JSON.parse(raw) : [];
-      const list: DivisionMove[] = Array.isArray(parsed) ? parsed : [];
-      setMoves(sortMoves(list));
+      const res = await fetch(
+        supabaseRestUrl('/division_moves?select=*&order=created_at.desc'),
+        { headers: supabaseHeaders() }
+      );
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        Alert.alert('Load failed', json?.message || 'Unknown error');
+        setMoves([]);
+        return;
+      }
+
+      const rows = Array.isArray(json) ? json : [];
+
+      // Convert supabase rows -> local UI shape
+      const list: DivisionMove[] = rows.map((r: any) => ({
+        id: String(r.id), // ✅ USE SUPABASE ID so delete works
+        team: String(r.team || ''),
+        fromDivision: (r.from_division as Division) || 'Beginner',
+        toDivision: (r.to_division as Division) || 'Beginner',
+        effectiveWeek: Number(r.effective_week ?? r.start_week ?? 1),
+        createdAt: new Date(r.created_at).getTime(),
+      }));
+
+      const sorted = sortMoves(list);
+      setMoves(sorted);
+      // keep a local cache too (optional)
+      await AsyncStorage.setItem(STORAGE_KEY_DIVISION_MOVES, JSON.stringify(sorted));
     } catch {
       setMoves([]);
     } finally {
@@ -129,39 +152,38 @@ export default function AdminDivisionMovesScreen() {
     }
   }, []);
 
- const persistMoves = useCallback(async (next: DivisionMove[]) => {
-  const sorted = sortMoves(next);
-  setMoves(sorted);
+  // ✅ Upsert to Supabase (one row per team, you already have unique index)
+  const saveMoveToSupabase = useCallback(
+    async (nextMove: { team: string; fromDivision: Division; toDivision: Division; effectiveWeek: number }) => {
+      const payload = {
+        team: nextMove.team.trim(),
+        from_division: nextMove.fromDivision,
+        to_division: nextMove.toDivision,
+        effective_week: nextMove.effectiveWeek,
+      };
 
-  // 🔥 WRITE TO SUPABASE (single source of truth)
-  const latest = sorted[sorted.length - 1];
-  if (!latest) return;
+      const res = await fetch(
+        supabaseRestUrl('/division_moves?on_conflict=team'),
+        {
+          method: 'POST',
+          headers: supabaseHeaders({
+            Prefer: 'return=representation,resolution=merge-duplicates',
+          }),
+          body: JSON.stringify(payload),
+        }
+      );
 
-  const payload = {
-    team: latest.team.trim(),
-    from_division: latest.fromDivision,
-    to_division: latest.toDivision,
-    effective_week: latest.effectiveWeek,
-  };
+      const json = await res.json().catch(() => null);
 
-  const res = await fetch(
-    supabaseRestUrl('division_moves'),
-    {
-      method: 'POST',
-      headers: {
-        ...supabaseHeaders(),
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify(payload),
-    }
+      if (!res.ok) {
+        Alert.alert('Save failed', json?.message || 'Unknown error');
+        return false;
+      }
+
+      return true;
+    },
+    []
   );
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    console.error('FAILED TO SAVE DIVISION MOVE:', txt);
-  }
-}, []);
-
 
   // ✅ Guard screen + load data each time you open it
   useFocusEffect(
@@ -194,20 +216,21 @@ export default function AdminDivisionMovesScreen() {
       return;
     }
 
-    const newMove: DivisionMove = {
-      id: uid(),
+    const ok = await saveMoveToSupabase({
       team,
       fromDivision: moveFrom,
       toDivision: moveTo,
       effectiveWeek: wk,
-      createdAt: Date.now(),
-    };
+    });
 
-    await persistMoves([...moves, newMove]);
+    if (!ok) return;
 
-    // Reset just the inputs you’ll want reset
+    // reset inputs
     setMoveTeam('');
     setMoveWeek(String(wk));
+
+    // refresh from Supabase
+    await loadMoves();
   };
 
   const deleteMove = async (id: string) => {
@@ -220,17 +243,29 @@ export default function AdminDivisionMovesScreen() {
     );
     if (!ok) return;
 
-    await persistMoves(moves.filter((m) => m.id !== id));
+    // ✅ DELETE FROM SUPABASE BY ID (this is the missing piece)
+    const res = await fetch(supabaseRestUrl(`/division_moves?id=eq.${id}`), {
+      method: 'DELETE',
+      headers: supabaseHeaders(),
+    });
+
+    Alert.alert('DELETE status', String(res.status));
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => null);
+      Alert.alert('Delete failed', j?.message || 'Unknown error');
+      return;
+    }
+
+    await loadMoves();
   };
 
   return (
     <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 40 }}>
-      <Text style={{ fontSize: 24, fontWeight: 'bold', marginBottom: 12 }}>
-        Division Moves
-      </Text>
+      <Text style={{ fontSize: 24, fontWeight: 'bold', marginBottom: 12 }}>Division Moves</Text>
 
       <Text style={{ marginBottom: 16, color: '#444' }}>
-        Choose a team and save a division change. Standings will use this saved data.
+        Choose a team and save a division change. Standings & schedule builder will use Supabase.
       </Text>
 
       <Text style={{ fontWeight: '800', marginBottom: 6 }}>Team</Text>
@@ -287,9 +322,7 @@ export default function AdminDivisionMovesScreen() {
           marginBottom: 14,
         }}
       >
-        <Text style={{ color: 'white', fontSize: 16, fontWeight: '800' }}>
-          Save Division Move
-        </Text>
+        <Text style={{ color: 'white', fontSize: 16, fontWeight: '800' }}>Save Division Move</Text>
       </Pressable>
 
       <Text style={{ fontSize: 18, fontWeight: '900', marginBottom: 8 }}>Saved Moves</Text>
