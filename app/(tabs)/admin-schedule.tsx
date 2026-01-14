@@ -35,7 +35,8 @@ const STORAGE_KEY_MATCHES = 'ppl_matches_v1';
 // We still read it if present to preserve user experience on this device.
 const STORAGE_KEY_CURRENT_WEEK = 'ppl_current_week';
 
-// ✅ Attendance storage (must match Admin Attendance screen)
+// ✅ Attendance storage (must match Admin Attendance screen) (legacy local key prefix)
+// NOTE: Schedule Builder now uses Supabase for attendance, but we keep this const for compatibility.
 const ATTENDANCE_KEY_PREFIX = 'ppl_team_attendance_week_v1_';
 type AttendanceMap = Record<string, boolean>; // true = present, false = out
 
@@ -227,6 +228,41 @@ async function fetchTeamsFromSupabase(): Promise<Record<Division, SupabaseTeamRo
   }
 
   return grouped;
+}
+
+// =============================
+// ✅ Supabase Attendance (Schedule Builder reads THIS)
+// =============================
+type SupabaseAttendanceRow = {
+  team: string;
+  present: boolean;
+};
+
+async function fetchAttendanceFromSupabase(week: number): Promise<Record<string, boolean>> {
+  if (week <= 0) return {};
+
+  const url = supabaseRestUrl(`attendance?select=team,present&week=eq.${week}`);
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase attendance SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseAttendanceRow[];
+  const map: Record<string, boolean> = {};
+
+  for (const r of rows) {
+    const team = String(r.team || '').trim();
+    if (!team) continue;
+    map[team] = Boolean(r.present);
+  }
+
+  return map;
 }
 
 // =============================
@@ -614,7 +650,7 @@ export default function AdminScheduleScreen() {
 
   // ✅ Attendance map for the TYPED week (Week input field)
   const [attendance, setAttendance] = useState<AttendanceMap>({});
-  const getAttendanceKeyForWeek = (w: number) => `${ATTENDANCE_KEY_PREFIX}${w}`;
+  const getAttendanceKeyForWeek = (w: number) => `${ATTENDANCE_KEY_PREFIX}${w}`; // legacy, not used now
 
   const loadAttendanceForTypedWeek = async (w: number) => {
     try {
@@ -622,10 +658,12 @@ export default function AdminScheduleScreen() {
         setAttendance({});
         return;
       }
-      const raw = await AsyncStorage.getItem(getAttendanceKeyForWeek(w));
-      const parsed: AttendanceMap = raw ? JSON.parse(raw) : {};
-      setAttendance(parsed && typeof parsed === 'object' ? parsed : {});
+
+      // ✅ SOURCE OF TRUTH: Supabase attendance table
+      const map = await fetchAttendanceFromSupabase(w);
+      setAttendance(map);
     } catch {
+      // If Supabase fails, don't crash—assume everyone present
       setAttendance({});
     }
   };
