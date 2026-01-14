@@ -200,7 +200,7 @@ export default function PhotosScreen() {
 
       // IMPORTANT: Use POST with file body + correct headers
       const upRes = await fetch(url, {
-        method: "POST",
+        method: "PUT",
         headers: {
           ...supabaseHeaders({
             Accept: "application/json",
