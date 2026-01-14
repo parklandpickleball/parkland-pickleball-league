@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ScrollView, Text, View } from 'react-native';
@@ -459,14 +458,41 @@ export default function StandingsScreen() {
       setBaseLoadError(e?.message || 'Failed to load Week 1 baseline from Supabase.');
     }
 
-    // 2) Division moves still local/admin-controlled (for now)
-    const rawMoves = await AsyncStorage.getItem(STORAGE_KEY_DIVISION_MOVES);
-    try {
-      const parsed = rawMoves ? JSON.parse(rawMoves) : [];
-      setDivisionMoves(Array.isArray(parsed) ? parsed : []);
-    } catch {
-      setDivisionMoves([]);
-    }
+    // 2) Division moves from Supabase (shared)
+try {
+  const url = supabaseRestUrl(
+    'division_moves?select=id,team,from_division,to_division,effective_week,created_at&order=effective_week.asc&order=created_at.asc'
+  );
+
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase division_moves SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as any[];
+
+  const parsed: DivisionMove[] = rows
+    .map((r) => ({
+      id: String(r.id),
+      team: String(r.team ?? ''),
+      fromDivision: r.from_division as Division,
+      toDivision: r.to_division as Division,
+      effectiveWeek: Number(r.effective_week ?? 1) || 1,
+      createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+    }))
+    .filter(
+      (mv) =>
+        mv.team &&
+        isDivision(mv.fromDivision) &&
+        isDivision(mv.toDivision)
+    );
+
+  setDivisionMoves(parsed);
+} catch {
+  setDivisionMoves([]);
+}
+
   }, []);
 
   useEffect(() => {
