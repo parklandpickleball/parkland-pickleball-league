@@ -33,18 +33,15 @@ type AnnouncementRow = {
 
 type Post = AnnouncementRow & { replies: ReplyRow[] };
 
-// ✅ OFFICIAL badge image (Season 3 logo)
-const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo.png");
+const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo 2.png");
 
 export default function AdminAnnouncementsScreen() {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<Post[]>([]);
   const [text, setText] = useState("");
 
-  // Admin identity
   const currentAuthor = "ADMIN";
 
-  // Inline reply UI state (one post at a time)
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
 
@@ -56,7 +53,6 @@ export default function AdminAnnouncementsScreen() {
     try {
       setLoading(true);
 
-      // ✅ ADMIN feed shows BOTH admin + community announcements
       const aUrl = supabaseRestUrl(
         "/announcements?select=*&scope=in.(admin,community)&order=created_at.desc"
       );
@@ -110,11 +106,9 @@ export default function AdminAnnouncementsScreen() {
     return new Date(iso).toLocaleString();
   }
 
-  // ✅ Admin screen: admin can delete ANY post/reply
   const canDeletePost = (_p: Post) => true;
   const canDeleteReply = (_r: ReplyRow) => true;
 
-  // 🔔 Admin-post notification trigger (ADMIN POSTS ONLY)
   async function triggerAdminPostNotification(message: string) {
     try {
       if (Platform.OS === "web") return;
@@ -140,7 +134,7 @@ export default function AdminAnnouncementsScreen() {
         trigger: null,
       });
     } catch {
-      // silent fail
+      // silent
     }
   }
 
@@ -158,7 +152,6 @@ export default function AdminAnnouncementsScreen() {
       }),
     });
 
-    // ✅ SHOW STATUS EVERY TIME (so we know what's happening)
     Alert.alert("POST status", String(res.status));
 
     const json = await res.json().catch(() => null);
@@ -170,8 +163,6 @@ export default function AdminAnnouncementsScreen() {
 
     setText("");
     await loadAll();
-
-    // ✅ ONLY admin-posted announcements trigger a notification
     await triggerAdminPostNotification(trimmed);
   }
 
@@ -319,16 +310,14 @@ export default function AdminAnnouncementsScreen() {
               <View style={styles.card}>
                 <View style={styles.cardTopRow}>
                   <View style={styles.leftHeaderRow}>
-                    <ThemedText type="defaultSemiBold">{headerLabel}</ThemedText>
-
                     {isAdminPost ? (
-                      <View style={styles.officialBadge}>
-                        <Image
-                          source={OFFICIAL_BADGE_IMG}
-                          style={styles.officialBadgeImage}
-                        />
+                      <View style={styles.adminBadge}>
+                        <Image source={OFFICIAL_BADGE_IMG} style={styles.badgeImg} />
+                        <ThemedText type="defaultSemiBold">ADMIN</ThemedText>
                       </View>
-                    ) : null}
+                    ) : (
+                      <ThemedText type="defaultSemiBold">{headerLabel}</ThemedText>
+                    )}
                   </View>
 
                   {canDeletePost(item) ? (
@@ -339,7 +328,6 @@ export default function AdminAnnouncementsScreen() {
                 </View>
 
                 <ThemedText style={styles.author}>{displayAuthor}</ThemedText>
-
                 <ThemedText>{item.message}</ThemedText>
 
                 <View style={styles.actionRow}>
@@ -371,27 +359,38 @@ export default function AdminAnnouncementsScreen() {
 
                 {item.replies && item.replies.length > 0 ? (
                   <View style={styles.repliesWrap}>
-                    {item.replies.map((r) => (
-                      <View key={r.id} style={styles.replyBubble}>
-                        <View style={styles.replyTopRow}>
-                          <ThemedText style={styles.replyAuthor}>{r.author}</ThemedText>
+                    {item.replies.map((r) => {
+                      const isAdminReply = r.author === "ADMIN";
 
-                          {canDeleteReply(r) ? (
-                            <Pressable
-                              onPress={() => onDeleteReply(item.id, r)}
-                              style={styles.replyDeletePill}
-                            >
-                              <ThemedText>Delete</ThemedText>
-                            </Pressable>
-                          ) : null}
+                      return (
+                        <View key={r.id} style={styles.replyBubble}>
+                          <View style={styles.replyTopRow}>
+                            {isAdminReply ? (
+                              <View style={styles.adminBadge}>
+                                <Image source={OFFICIAL_BADGE_IMG} style={styles.badgeImg} />
+                                <ThemedText type="defaultSemiBold">ADMIN</ThemedText>
+                              </View>
+                            ) : (
+                              <ThemedText style={styles.replyAuthor}>{r.author}</ThemedText>
+                            )}
+
+                            {canDeleteReply(r) ? (
+                              <Pressable
+                                onPress={() => onDeleteReply(item.id, r)}
+                                style={styles.replyDeletePill}
+                              >
+                                <ThemedText>Delete</ThemedText>
+                              </Pressable>
+                            ) : null}
+                          </View>
+
+                          <ThemedText style={styles.replyText}>{r.message}</ThemedText>
+                          <ThemedText style={styles.replyTime}>
+                            {formatTime(r.created_at)}
+                          </ThemedText>
                         </View>
-
-                        <ThemedText style={styles.replyText}>{r.message}</ThemedText>
-                        <ThemedText style={styles.replyTime}>
-                          {formatTime(r.created_at)}
-                        </ThemedText>
-                      </View>
-                    ))}
+                      );
+                    })}
                   </View>
                 ) : null}
 
@@ -455,24 +454,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
 
-  officialBadge: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    overflow: "hidden",
-    borderWidth: 1,
-    opacity: 0.95,
-    shadowColor: "#00AEEF",
-    shadowOpacity: 0.9,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 6,
-  },
-
-  officialBadgeImage: {
-    width: "100%",
-    height: "100%",
-  },
+  // ✅ Match the badge style used yesterday (small logo + ADMIN text)
+  adminBadge: { flexDirection: "row", alignItems: "center", gap: 8 },
+  badgeImg: { width: 18, height: 18, borderRadius: 9 },
 
   deletePill: {
     borderWidth: 1,
