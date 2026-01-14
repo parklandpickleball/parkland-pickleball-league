@@ -1,59 +1,55 @@
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Image, Linking, Pressable, StyleSheet, View } from "react-native";
 
-type Sponsor = {
-  id: "diadem" | "ellie" | "zenov";
+import { supabaseHeaders, supabaseRestUrl } from "@/constants/supabase";
+
+type SponsorRow = {
+  id: string;
   name: string;
   website: string;
+  is_active: boolean;
+  sort_order: number;
 };
 
 export default function SponsorsScreen() {
-  // ✅ Sponsors (final)
-  const sponsors: Sponsor[] = useMemo(
-    () => [
-      {
-        id: "diadem",
-        name: "Diadem",
-        website: "https://diademsports.com/",
-      },
-      {
-        id: "ellie",
-        name: "Ellie Mental Health of Pembroke Pines, FL",
-        website: "https://elliementalhealth.com/locations/pembroke-pines-fl/",
-      },
-      {
-        id: "zenov",
-        name: "Zenov BPO",
-        website: "https://www.zenov-bpo.com/",
-      },
-    ],
-    []
-  );
+  const [sponsors, setSponsors] = useState<SponsorRow[]>([]);
+  const [failed, setFailed] = useState<Record<string, boolean>>({});
 
-  // ✅ Local logo images (from assets)
-  // IMPORTANT: These files must exist:
-  // assets/sponsors/diadem.png
-  // assets/sponsors/ellie.png
-  // assets/sponsors/zenov.png
+  // Local logos (unchanged)
   const logos = useMemo(
     () => ({
-      diadem: require("../../assets/sponsors/diadem.png"),
-      ellie: require("../../assets/sponsors/ellie.png"),
-      zenov: require("../../assets/sponsors/zenov.png"),
+      Diadem: require("../../assets/sponsors/diadem.png"),
+      "Ellie Mental Health of Pembroke Pines, FL": require("../../assets/sponsors/ellie.png"),
+      "Zenov BPO": require("../../assets/sponsors/zenov.png"),
     }),
     []
   );
 
-  const [failed, setFailed] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(
+          supabaseRestUrl(
+            "sponsors?select=id,name,website,is_active,sort_order&is_active=eq.true&order=sort_order.asc"
+          ),
+          { headers: supabaseHeaders() }
+        );
+
+        if (!res.ok) throw new Error("Failed to load sponsors");
+        const rows = (await res.json()) as SponsorRow[];
+        setSponsors(rows);
+      } catch {
+        setSponsors([]);
+      }
+    })();
+  }, []);
 
   const openWebsite = async (url: string) => {
     try {
       await Linking.openURL(url);
-    } catch {
-      // no crash
-    }
+    } catch {}
   };
 
   return (
@@ -67,8 +63,8 @@ export default function SponsorsScreen() {
 
       <View style={styles.list}>
         {sponsors.map((s) => {
-          const logoSource = logos[s.id];
-          const showFallback = failed[s.id] === true;
+          const logoSource = logos[s.name as keyof typeof logos];
+          const showFallback = failed[s.id] || !logoSource;
 
           return (
             <Pressable
@@ -111,17 +107,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, gap: 12 },
   header: { gap: 6 },
   sub: { opacity: 0.8 },
-
   list: { gap: 12, marginTop: 4 },
-
-  card: {
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-  },
-
+  card: { borderWidth: 1, borderRadius: 12, padding: 12 },
   row: { flexDirection: "row", alignItems: "center", gap: 12 },
-
   logoBox: {
     width: 72,
     height: 56,
@@ -131,15 +119,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
-
-  logo: {
-    width: 64,
-    height: 44,
-  },
-
+  logo: { width: 64, height: 44 },
   logoFallback: { opacity: 0.6, fontSize: 12 },
-
   link: { opacity: 0.7, fontSize: 12 },
-
   tap: { opacity: 0.6, fontSize: 12 },
 });
