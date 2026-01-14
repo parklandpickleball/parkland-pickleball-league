@@ -1,3 +1,4 @@
+import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Picker } from '@react-native-picker/picker';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -128,11 +129,39 @@ export default function AdminDivisionMovesScreen() {
     }
   }, []);
 
-  const persistMoves = useCallback(async (next: DivisionMove[]) => {
-    const sorted = sortMoves(next);
-    setMoves(sorted);
-    await AsyncStorage.setItem(STORAGE_KEY_DIVISION_MOVES, JSON.stringify(sorted));
-  }, []);
+ const persistMoves = useCallback(async (next: DivisionMove[]) => {
+  const sorted = sortMoves(next);
+  setMoves(sorted);
+
+  // 🔥 WRITE TO SUPABASE (single source of truth)
+  const latest = sorted[sorted.length - 1];
+  if (!latest) return;
+
+  const payload = {
+    team: latest.team.trim(),
+    from_division: latest.fromDivision,
+    to_division: latest.toDivision,
+    effective_week: latest.effectiveWeek,
+  };
+
+  const res = await fetch(
+    supabaseRestUrl('division_moves'),
+    {
+      method: 'POST',
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    console.error('FAILED TO SAVE DIVISION MOVE:', txt);
+  }
+}, []);
+
 
   // ✅ Guard screen + load data each time you open it
   useFocusEffect(
