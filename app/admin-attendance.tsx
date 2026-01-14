@@ -11,7 +11,6 @@ type DivisionGroup = { division: Division; teams: string[] };
 type AttendanceMap = Record<string, boolean>; // true = present (green), false = out (red)
 
 const STORAGE_KEY_CURRENT_WEEK = 'ppl_current_week';
-const ATTENDANCE_KEY_PREFIX = 'ppl_team_attendance_week_v1_';
 
 // ✅ Baseline teams (same as Schedule Builder)
 const TEAMS_BY_DIVISION: Record<Division, string[]> = {
@@ -65,6 +64,14 @@ type SupabaseTeamRow = {
   name: string;
 };
 
+type AttendanceRow = {
+  id: string;
+  week: number;
+  team: string;
+  present: boolean;
+  updated_at: string;
+};
+
 function safeInt(value: string, fallback: number) {
   const n = parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -110,6 +117,42 @@ async function fetchTeamsFromSupabase(): Promise<Record<Division, SupabaseTeamRo
   return grouped;
 }
 
+async function fetchAttendanceForWeek(week: number): Promise<AttendanceRow[]> {
+  const url = supabaseRestUrl(
+    `attendance?select=id,week,team,present,updated_at&week=eq.${week}&order=team.asc`
+  );
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Attendance SELECT failed: ${res.status} ${txt}`);
+  }
+
+  return (await res.json()) as AttendanceRow[];
+}
+
+async function upsertAttendanceRow(week: number, team: string, present: boolean) {
+  // Use PostgREST upsert on unique(week, team)
+  const url = supabaseRestUrl('attendance?on_conflict=week,team');
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: supabaseHeaders({
+      Prefer: 'resolution=merge-duplicates,return=representation',
+    }),
+    body: JSON.stringify([{ week, team, present }]),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Attendance UPSERT failed: ${res.status} ${txt}`);
+  }
+}
+
 export default function AdminAttendanceScreen() {
   const router = useRouter();
 
@@ -129,7 +172,7 @@ export default function AdminAttendanceScreen() {
       const grouped = await fetchTeamsFromSupabase();
       setDbTeams(grouped);
     } catch {
-      // If Supabase fails, still show baseline teams so attendance screen still works
+      // still show baseline teams
       setDbTeams({ Advanced: [], Intermediate: [], Beginner: [] });
     }
   };
@@ -171,8 +214,6 @@ export default function AdminAttendanceScreen() {
   const [loading, setLoading] = useState(true);
   const [attendance, setAttendance] = useState<AttendanceMap>({});
 
-  const getKeyForWeek = (w: number) => `${ATTENDANCE_KEY_PREFIX}${w}`;
-
   // ✅ IMPORTANT: Explicit navigation back into the Tabs area
   const goToAdminDashboard = () => {
     router.replace('/admin' as any);
@@ -193,27 +234,34 @@ export default function AdminAttendanceScreen() {
     })();
   }, []);
 
-  const loadAttendanceForWeek = useCallback(
+  const loadAttendance = useCallback(
     async (w: number) => {
       if (w <= 0) return;
       setLoading(true);
       try {
-        const raw = await AsyncStorage.getItem(getKeyForWeek(w));
-        const parsed: AttendanceMap = raw ? JSON.parse(raw) : {};
-        const normalized: AttendanceMap = { ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+        // Pull current week attendance from Supabase
+        const rows = await fetchAttendanceForWeek(w);
+        const map: AttendanceMap = {};
 
-        // ✅ Ensure every team (including Supabase teams) exists in the map
-        for (const team of allTeamsFlat) {
-          if (typeof normalized[team] !== 'boolean') normalized[team] = true;
+        for (const r of rows) {
+          if (typeof r.team === 'string' && r.team.trim().length > 0) {
+            map[r.team] = r.present !== false;
+          }
         }
 
-        setAttendance(normalized);
-        await AsyncStorage.setItem(getKeyForWeek(w), JSON.stringify(normalized));
-      } catch {
-        const reset: AttendanceMap = {};
-        for (const team of allTeamsFlat) reset[team] = true;
-        setAttendance(reset);
-        await AsyncStorage.setItem(getKeyForWeek(w), JSON.stringify(reset));
+        // Ensure all teams exist (default present=true)
+        for (const team of allTeamsFlat) {
+          if (typeof map[team] !== 'boolean') map[team] = true;
+        }
+
+        setAttendance(map);
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        Alert.alert('Attendance load failed', msg);
+        // Still show teams default present so screen isn't empty
+        const fallback: AttendanceMap = {};
+        for (const team of allTeamsFlat) fallback[team] = true;
+        setAttendance(fallback);
       } finally {
         setLoading(false);
       }
@@ -221,24 +269,32 @@ export default function AdminAttendanceScreen() {
     [allTeamsFlat]
   );
 
-  // Reload attendance when week changes OR teams list changes (so newly added teams appear)
+  // Reload attendance when week changes OR teams list changes
   useEffect(() => {
-    if (weekNum > 0) void loadAttendanceForWeek(weekNum);
-  }, [weekNum, loadAttendanceForWeek]);
-
-  const saveAttendanceForWeek = async (w: number, next: AttendanceMap) => {
-    setAttendance(next);
-    await AsyncStorage.setItem(getKeyForWeek(w), JSON.stringify(next));
-  };
+    if (weekNum > 0) void loadAttendance(weekNum);
+  }, [weekNum, loadAttendance]);
 
   const toggleTeam = async (team: string) => {
     if (weekNum <= 0) {
       Alert.alert('Week required', 'Please enter a valid week number first.');
       return;
     }
+
     const current = attendance[team] !== false;
-    const next: AttendanceMap = { ...attendance, [team]: !current };
-    await saveAttendanceForWeek(weekNum, next);
+    const nextPresent = !current;
+
+    // Optimistic UI
+    setAttendance((prev) => ({ ...prev, [team]: nextPresent }));
+
+    try {
+      await upsertAttendanceRow(weekNum, team, nextPresent);
+      // Reload to ensure perfect sync & handle any new teams/rows
+      await loadAttendance(weekNum);
+    } catch (e: any) {
+      // Revert UI on failure
+      setAttendance((prev) => ({ ...prev, [team]: current }));
+      Alert.alert('Save failed', String(e?.message || e));
+    }
   };
 
   const markAllPresent = async () => {
@@ -246,10 +302,22 @@ export default function AdminAttendanceScreen() {
       Alert.alert('Week required', 'Please enter a valid week number first.');
       return;
     }
-    const next: AttendanceMap = {};
-    for (const team of allTeamsFlat) next[team] = true;
-    await saveAttendanceForWeek(weekNum, next);
-    Alert.alert('Done', `All teams set to PRESENT for Week ${weekNum}.`);
+
+    try {
+      setLoading(true);
+
+      // Upsert present=true for every team
+      for (const team of allTeamsFlat) {
+        await upsertAttendanceRow(weekNum, team, true);
+      }
+
+      await loadAttendance(weekNum);
+      Alert.alert('Done', `All teams set to PRESENT for Week ${weekNum}.`);
+    } catch (e: any) {
+      Alert.alert('Save failed', String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
