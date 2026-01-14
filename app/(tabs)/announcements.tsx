@@ -31,7 +31,6 @@ type Post = {
   replies: Reply[];
 };
 
-// ✅ Correct badge image file
 const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo 2.png");
 
 export default function AnnouncementsScreen() {
@@ -40,7 +39,6 @@ export default function AnnouncementsScreen() {
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
 
-  // ✅ This should become: "Brandon (Brandon/Ikewa)"
   const [currentAuthor, setCurrentAuthor] = useState<string>("Community");
 
   useEffect(() => {
@@ -52,7 +50,6 @@ export default function AnnouncementsScreen() {
 
   async function loadAuthor() {
     try {
-      // ✅ THESE are the real keys from your screenshot
       const name = (await AsyncStorage.getItem("ppl_selected_player_name"))?.trim() || "";
       const team = (await AsyncStorage.getItem("ppl_selected_team"))?.trim() || "";
 
@@ -107,6 +104,20 @@ export default function AnnouncementsScreen() {
     );
   }
 
+  // ✅ Community users can delete ONLY their own items
+  const canDeletePost = (p: Post) => {
+    // If you’re browsing as ADMIN for any reason, allow it
+    if (currentAuthor === "ADMIN") return true;
+
+    // Community tab: only allow deleting community posts that match your author string
+    return p.scope === "community" && p.author === currentAuthor;
+  };
+
+  const canDeleteReply = (r: Reply) => {
+    if (currentAuthor === "ADMIN") return true;
+    return r.author === currentAuthor;
+  };
+
   async function postAnnouncement() {
     if (!text.trim()) return;
 
@@ -115,7 +126,7 @@ export default function AnnouncementsScreen() {
       headers: supabaseHeaders(),
       body: JSON.stringify({
         scope: "community",
-        author: currentAuthor, // ✅ now uses Brandon (Team)
+        author: currentAuthor,
         message: text.trim(),
       }),
     });
@@ -132,7 +143,7 @@ export default function AnnouncementsScreen() {
       headers: supabaseHeaders(),
       body: JSON.stringify({
         announcement_id: postId,
-        author: currentAuthor, // ✅ now uses Brandon (Team)
+        author: currentAuthor,
         message: replyText.trim(),
       }),
     });
@@ -142,7 +153,9 @@ export default function AnnouncementsScreen() {
     loadAll();
   }
 
-  async function deletePost(id: string) {
+  async function deletePost(id: string, post: Post) {
+    if (!canDeletePost(post)) return;
+
     await fetch(supabaseRestUrl(`/announcements?id=eq.${id}`), {
       method: "DELETE",
       headers: supabaseHeaders(),
@@ -150,7 +163,9 @@ export default function AnnouncementsScreen() {
     loadAll();
   }
 
-  async function deleteReply(id: string) {
+  async function deleteReply(id: string, reply: Reply) {
+    if (!canDeleteReply(reply)) return;
+
     await fetch(supabaseRestUrl(`/announcement_replies?id=eq.${id}`), {
       method: "DELETE",
       headers: supabaseHeaders(),
@@ -203,9 +218,11 @@ export default function AnnouncementsScreen() {
                     <ThemedText type="defaultSemiBold">COMMUNITY</ThemedText>
                   )}
 
-                  <Pressable onPress={() => deletePost(item.id)}>
-                    <ThemedText>Delete</ThemedText>
-                  </Pressable>
+                  {canDeletePost(item) ? (
+                    <Pressable onPress={() => deletePost(item.id, item)}>
+                      <ThemedText>Delete</ThemedText>
+                    </Pressable>
+                  ) : null}
                 </View>
 
                 <ThemedText style={styles.author}>{item.author}</ThemedText>
@@ -245,9 +262,11 @@ export default function AnnouncementsScreen() {
                           <ThemedText>{r.author}</ThemedText>
                         )}
 
-                        <Pressable onPress={() => deleteReply(r.id)}>
-                          <ThemedText>Delete</ThemedText>
-                        </Pressable>
+                        {canDeleteReply(r) ? (
+                          <Pressable onPress={() => deleteReply(r.id, r)}>
+                            <ThemedText>Delete</ThemedText>
+                          </Pressable>
+                        ) : null}
                       </View>
 
                       <ThemedText>{r.message}</ThemedText>
