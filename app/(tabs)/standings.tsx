@@ -476,14 +476,21 @@ try {
   const rows = (await res.json()) as any[];
 
   const parsed: DivisionMove[] = rows
-    .map((r) => ({
+  .map((r) => {
+    const team = normalizeName(String(r.team ?? ''));
+    const fromDivision = String(r.from_division ?? '').trim();
+    const toDivision = String(r.to_division ?? '').trim();
+
+    return {
       id: String(r.id),
-      team: String(r.team ?? ''),
-      fromDivision: r.from_division as Division,
-      toDivision: r.to_division as Division,
+      team,
+      fromDivision: fromDivision as Division,
+      toDivision: toDivision as Division,
       effectiveWeek: Number(r.effective_week ?? 1) || 1,
       createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
-    }))
+    };
+  })
+
     .filter(
       (mv) =>
         mv.team &&
