@@ -4,12 +4,13 @@ import { supabaseHeaders, supabaseRestUrl } from "@/constants/supabase";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   StyleSheet,
   TextInput,
-  View
+  View,
 } from "react-native";
 
 type Reply = {
@@ -22,6 +23,7 @@ type Reply = {
 
 type Post = {
   id: string;
+  scope: "community" | "admin";
   author: string;
   message: string;
   created_at: string;
@@ -42,18 +44,16 @@ export default function AnnouncementsScreen() {
   }, []);
 
   async function loadAll() {
+    // ✅ COMMUNITY feed shows BOTH community + admin announcements
     const res = await fetch(
-      supabaseRestUrl("/announcements?scope=eq.community&order=created_at.desc"),
+      supabaseRestUrl(
+        "/announcements?scope=in.(community,admin)&order=created_at.desc"
+      ),
       { headers: supabaseHeaders() }
     );
     const announcements = await res.json();
 
-    if (!Array.isArray(announcements)) {
-      setPosts([]);
-      return;
-    }
-
-    if (announcements.length === 0) {
+    if (!Array.isArray(announcements) || announcements.length === 0) {
       setPosts([]);
       return;
     }
@@ -69,10 +69,12 @@ export default function AnnouncementsScreen() {
     const replies: Reply[] = await replyRes.json();
 
     const grouped: Record<string, Reply[]> = {};
-    replies.forEach((r) => {
-      if (!grouped[r.announcement_id]) grouped[r.announcement_id] = [];
-      grouped[r.announcement_id].push(r);
-    });
+    if (Array.isArray(replies)) {
+      replies.forEach((r) => {
+        if (!grouped[r.announcement_id]) grouped[r.announcement_id] = [];
+        grouped[r.announcement_id].push(r);
+      });
+    }
 
     setPosts(
       announcements.map((a) => ({
@@ -134,13 +136,18 @@ export default function AnnouncementsScreen() {
   }
 
   const sorted = useMemo(
-    () => [...posts].sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at)),
+    () =>
+      [...posts].sort(
+        (a, b) => +new Date(b.created_at) - +new Date(a.created_at)
+      ),
     [posts]
   );
 
   return (
     <ThemedView style={{ flex: 1 }}>
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
         <FlatList
           data={sorted}
           keyExtractor={(i) => i.id}
@@ -163,48 +170,62 @@ export default function AnnouncementsScreen() {
               </View>
             </View>
           }
-          renderItem={({ item }) => (
-            <View style={styles.card}>
-              <View style={styles.cardTopRow}>
-                <ThemedText type="defaultSemiBold">COMMUNITY</ThemedText>
-                <Pressable onPress={() => deletePost(item.id)}>
-                  <ThemedText>Delete</ThemedText>
-                </Pressable>
-              </View>
+          renderItem={({ item }) => {
+            const isAdmin = item.scope === "admin";
 
-              <ThemedText style={styles.author}>{item.author}</ThemedText>
-              <ThemedText>{item.message}</ThemedText>
+            return (
+              <View style={styles.card}>
+                <View style={styles.cardTopRow}>
+                  <View style={styles.badgeRow}>
+                    {isAdmin ? (
+                      <View style={styles.adminBadge}>
+                        <Image source={OFFICIAL_BADGE_IMG} style={styles.badgeImg} />
+                        <ThemedText type="defaultSemiBold">ADMIN</ThemedText>
+                      </View>
+                    ) : (
+                      <ThemedText type="defaultSemiBold">COMMUNITY</ThemedText>
+                    )}
+                  </View>
 
-              <Pressable onPress={() => setReplyingTo(item.id)}>
-                <ThemedText>Reply</ThemedText>
-              </Pressable>
-
-              {replyingTo === item.id && (
-                <View style={styles.replyComposer}>
-                  <TextInput
-                    value={replyText}
-                    onChangeText={setReplyText}
-                    placeholder="Write a reply..."
-                    style={styles.input}
-                    multiline
-                  />
-                  <Pressable onPress={() => postReply(item.id)}>
-                    <ThemedText>Post Reply</ThemedText>
-                  </Pressable>
-                </View>
-              )}
-
-              {item.replies.map((r) => (
-                <View key={r.id} style={styles.replyBubble}>
-                  <ThemedText>{r.author}</ThemedText>
-                  <ThemedText>{r.message}</ThemedText>
-                  <Pressable onPress={() => deleteReply(r.id)}>
+                  <Pressable onPress={() => deletePost(item.id)}>
                     <ThemedText>Delete</ThemedText>
                   </Pressable>
                 </View>
-              ))}
-            </View>
-          )}
+
+                <ThemedText style={styles.author}>{item.author}</ThemedText>
+                <ThemedText>{item.message}</ThemedText>
+
+                <Pressable onPress={() => setReplyingTo(item.id)}>
+                  <ThemedText>Reply</ThemedText>
+                </Pressable>
+
+                {replyingTo === item.id && (
+                  <View style={styles.replyComposer}>
+                    <TextInput
+                      value={replyText}
+                      onChangeText={setReplyText}
+                      placeholder="Write a reply..."
+                      style={styles.input}
+                      multiline
+                    />
+                    <Pressable onPress={() => postReply(item.id)}>
+                      <ThemedText>Post Reply</ThemedText>
+                    </Pressable>
+                  </View>
+                )}
+
+                {item.replies.map((r) => (
+                  <View key={r.id} style={styles.replyBubble}>
+                    <ThemedText>{r.author}</ThemedText>
+                    <ThemedText>{r.message}</ThemedText>
+                    <Pressable onPress={() => deleteReply(r.id)}>
+                      <ThemedText>Delete</ThemedText>
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            );
+          }}
         />
       </KeyboardAvoidingView>
     </ThemedView>
@@ -217,8 +238,13 @@ const styles = StyleSheet.create({
   input: { flex: 1, borderWidth: 1, borderRadius: 12, padding: 10 },
   postBtn: { borderWidth: 1, borderRadius: 12, padding: 10 },
   card: { borderWidth: 1, borderRadius: 12, padding: 12, gap: 6, marginTop: 10 },
-  cardTopRow: { flexDirection: "row", justifyContent: "space-between" },
+  cardTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   author: { fontSize: 12, opacity: 0.7 },
+
+  badgeRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  adminBadge: { flexDirection: "row", alignItems: "center", gap: 8 },
+  badgeImg: { width: 18, height: 18, borderRadius: 9 },
+
   replyComposer: { marginTop: 6, gap: 6 },
   replyBubble: { borderWidth: 1, borderRadius: 10, padding: 8, marginTop: 6 },
 });
