@@ -141,8 +141,11 @@ type SupabaseStandingsBaseRow = {
 };
 
 function normalizeName(s: string) {
-  return (s || '').trim();
+  return (s || '')
+    .replace(/\s+/g, ' ') // collapse any weird whitespace
+    .trim();
 }
+
 
 function uniqSorted(list: string[]) {
   const set = new Set(list.map((x) => normalizeName(x)).filter(Boolean));
