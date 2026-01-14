@@ -20,17 +20,22 @@ const ADMIN_UNLOCK_KEY = "ppl_admin_unlocked";
 const BUCKET = "photos";
 
 function storagePublicUrl(objectName: string) {
-  // Supabase storage public URL format
-  // NOTE: bucket must be public for images to display without auth
+  // bucket is PUBLIC in your screenshot
   return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${encodeURI(objectName)}`;
-}
-
-function storageObjectUrl(objectName: string) {
-  return `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURI(objectName)}`;
 }
 
 function storageListUrl() {
   return `${SUPABASE_URL}/storage/v1/object/list/${BUCKET}`;
+}
+
+function storageRemoveUrl() {
+  // official remove endpoint (POST) with { prefixes: [] }
+  return `${SUPABASE_URL}/storage/v1/object/${BUCKET}/remove`;
+}
+
+function storageUploadUrl(objectName: string) {
+  // IMPORTANT: use /upload endpoint (works cleanly with RLS + anon)
+  return `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURI(objectName)}`;
 }
 
 function baseName(p: string) {
@@ -39,13 +44,26 @@ function baseName(p: string) {
 }
 
 function uploaderFromObjectName(objectName: string) {
-  // we store uploads as: "<uploadedBy>/<filename>"
   const parts = objectName.split("/");
   return parts[0] || "unknown";
 }
 
 function safeFilename(name: string) {
   return name.replace(/[^\w.\-() ]+/g, "_").trim();
+}
+
+async function readResponseBody(res: Response) {
+  const ct = res.headers.get("content-type") || "";
+  try {
+    if (ct.includes("application/json")) {
+      const j = await res.json();
+      return JSON.stringify(j);
+    }
+    const t = await res.text();
+    return t;
+  } catch {
+    return "";
+  }
 }
 
 export default function PhotosScreen() {
@@ -57,7 +75,7 @@ export default function PhotosScreen() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ✅ Lightbox state
+  // ✅ Lightbox
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [selectedPhoto, setSelectedPhoto] = useState<PhotoItem | null>(null);
 
@@ -74,10 +92,11 @@ export default function PhotosScreen() {
         method: "POST",
         headers: {
           ...supabaseHeaders(),
+          Accept: "application/json",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          prefix: "", // list everything
+          prefix: "",
           limit: 1000,
           offset: 0,
           sortBy: { column: "created_at", order: "desc" },
@@ -85,7 +104,8 @@ export default function PhotosScreen() {
       });
 
       if (!res.ok) {
-        throw new Error(`List failed: ${res.status}`);
+        const body = await readResponseBody(res);
+        throw new Error(`List failed (${res.status}). ${body}`);
       }
 
       const json = await res.json();
@@ -162,11 +182,7 @@ export default function PhotosScreen() {
       fileInputRef.current?.click();
       return;
     }
-
-    Alert.alert(
-      "Phone Upload Not Enabled Yet",
-      "Phone uploads will be enabled next."
-    );
+    Alert.alert("Phone Upload Not Enabled Yet", "Phone uploads will be enabled next.");
   };
 
   const onWebPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -174,16 +190,19 @@ export default function PhotosScreen() {
     if (!file) return;
 
     try {
-      // store inside bucket as "<uploadedBy>/<timestamp>_<random>_<filename>"
       const ts = Date.now();
       const rand = Math.random().toString(16).slice(2);
       const filename = safeFilename(file.name || "photo.jpg");
       const objectName = `${uploadedBy}/${ts}_${rand}_${filename}`;
 
-      const upRes = await fetch(storageObjectUrl(objectName), {
+      const url = storageUploadUrl(objectName);
+
+      // IMPORTANT: Use POST with file body + correct headers
+      const upRes = await fetch(url, {
         method: "POST",
         headers: {
           ...supabaseHeaders({
+            Accept: "application/json",
             "Content-Type": file.type || "application/octet-stream",
             "x-upsert": "true",
           }),
@@ -192,8 +211,8 @@ export default function PhotosScreen() {
       });
 
       if (!upRes.ok) {
-        const txt = await upRes.text().catch(() => "");
-        throw new Error(`Upload failed (${upRes.status}): ${txt}`);
+        const body = await readResponseBody(upRes);
+        throw new Error(`Upload failed (${upRes.status}). ${body}`);
       }
 
       await loadPhotos();
@@ -216,19 +235,22 @@ export default function PhotosScreen() {
 
     const doDelete = async () => {
       try {
-        const delRes = await fetch(storageObjectUrl(p.id), {
-          method: "DELETE",
+        // Use remove endpoint with prefixes array
+        const delRes = await fetch(storageRemoveUrl(), {
+          method: "POST",
           headers: {
             ...supabaseHeaders(),
+            Accept: "application/json",
+            "Content-Type": "application/json",
           },
+          body: JSON.stringify({ prefixes: [p.id] }),
         });
 
         if (!delRes.ok) {
-          const txt = await delRes.text().catch(() => "");
-          throw new Error(`Delete failed (${delRes.status}): ${txt}`);
+          const body = await readResponseBody(delRes);
+          throw new Error(`Delete failed (${delRes.status}). ${body}`);
         }
 
-        // fast UI update + keep synced
         setPhotos((prev) => prev.filter((x) => x.id !== p.id));
       } catch (err: any) {
         Platform.OS === "web"
@@ -330,7 +352,6 @@ export default function PhotosScreen() {
           <Pressable
             style={styles.lightboxCard}
             onPress={(e) => {
-              // prevent closing when clicking inside
               // @ts-ignore
               e.stopPropagation?.();
             }}
@@ -358,9 +379,7 @@ export default function PhotosScreen() {
               ) : null}
             </View>
 
-            <ThemedText style={styles.lightboxHint}>
-              Tip: you can screenshot this view.
-            </ThemedText>
+            <ThemedText style={styles.lightboxHint}>Tip: you can screenshot this view.</ThemedText>
           </Pressable>
         </Pressable>
       </Modal>
