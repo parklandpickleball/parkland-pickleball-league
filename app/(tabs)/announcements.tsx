@@ -1,387 +1,210 @@
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabaseHeaders, supabaseRestUrl } from "@/constants/supabase";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-    Alert,
-    FlatList,
-    Image,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    StyleSheet,
-    TextInput,
-    View,
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View
 } from "react-native";
 
 type Reply = {
   id: string;
-  text: string;
-  createdAt: number;
+  announcement_id: string;
   author: string;
+  message: string;
+  created_at: string;
 };
 
 type Post = {
   id: string;
-  type: "COMMUNITY";
-  text: string;
-  createdAt: number;
   author: string;
+  message: string;
+  created_at: string;
   replies: Reply[];
 };
 
-const STORAGE_KEY = "ppl_announcements_posts_v1";
-
-// Identity keys (from app/team.tsx)
-const STORAGE_KEY_TEAM = "ppl_selected_team";
-const STORAGE_KEY_PLAYER_NAME = "ppl_selected_player_name";
-
-// ✅ OFFICIAL badge image (Season 3 logo)
 const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo.png");
 
 export default function AnnouncementsScreen() {
-  const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<Post[]>([]);
   const [text, setText] = useState("");
-
-  // Current identity
-  const [currentAuthor, setCurrentAuthor] = useState<string>("Unknown");
-
-  // Inline reply UI state (one post at a time)
-  const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
+  const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
+  const author = "Community";
 
   useEffect(() => {
-    let mounted = true;
-
-    (async () => {
-      try {
-        const [rawPosts, team, playerName] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEY),
-          AsyncStorage.getItem(STORAGE_KEY_TEAM),
-          AsyncStorage.getItem(STORAGE_KEY_PLAYER_NAME),
-        ]);
-
-        const parsed: any = rawPosts ? JSON.parse(rawPosts) : [];
-        const list = Array.isArray(parsed) ? parsed : [];
-
-        const name = (playerName || "").trim();
-        const teamName = (team || "").trim();
-        const who =
-          name && teamName ? `${name} (${teamName})` : name ? name : "Unknown";
-
-        const normalized: Post[] = list.map((p: any) => {
-          const author =
-            typeof p.author === "string" && p.author.trim() ? p.author : "Unknown";
-
-          const repliesRaw = Array.isArray(p.replies) ? p.replies : [];
-          const replies: Reply[] = repliesRaw.map((r: any) => ({
-            id: String(r.id ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`),
-            text: String(r.text ?? ""),
-            createdAt: Number(r.createdAt ?? Date.now()),
-            author:
-              typeof r.author === "string" && r.author.trim() ? r.author : "Unknown",
-          }));
-
-          return {
-            id: String(p.id),
-            type: "COMMUNITY",
-            text: String(p.text ?? ""),
-            createdAt: Number(p.createdAt ?? Date.now()),
-            author,
-            replies,
-          };
-        });
-
-        if (mounted) {
-          setPosts(normalized);
-          setCurrentAuthor(who);
-        }
-      } catch {
-        if (mounted) {
-          setPosts([]);
-          setCurrentAuthor("Unknown");
-        }
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    })();
-
-    return () => {
-      mounted = false;
-    };
+    loadAll();
   }, []);
 
-  async function persist(next: Post[]) {
-    setPosts(next);
-    try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      Alert.alert("Save failed", "Could not save posts.");
+  async function loadAll() {
+    const res = await fetch(
+      supabaseRestUrl("/announcements?scope=eq.community&order=created_at.desc"),
+      { headers: supabaseHeaders() }
+    );
+    const announcements = await res.json();
+
+    if (!Array.isArray(announcements)) {
+      setPosts([]);
+      return;
     }
+
+    if (announcements.length === 0) {
+      setPosts([]);
+      return;
+    }
+
+    const ids = announcements.map((a) => a.id).join(",");
+
+    const replyRes = await fetch(
+      supabaseRestUrl(
+        `/announcement_replies?announcement_id=in.(${ids})&order=created_at.asc`
+      ),
+      { headers: supabaseHeaders() }
+    );
+    const replies: Reply[] = await replyRes.json();
+
+    const grouped: Record<string, Reply[]> = {};
+    replies.forEach((r) => {
+      if (!grouped[r.announcement_id]) grouped[r.announcement_id] = [];
+      grouped[r.announcement_id].push(r);
+    });
+
+    setPosts(
+      announcements.map((a) => ({
+        ...a,
+        replies: grouped[a.id] || [],
+      }))
+    );
   }
 
-  const sortedPosts = useMemo(
-    () => [...posts].sort((a, b) => b.createdAt - a.createdAt),
-    [posts]
-  );
+  async function postAnnouncement() {
+    if (!text.trim()) return;
 
-  function formatTime(ms: number) {
-    return new Date(ms).toLocaleString();
-  }
-
-  const canDeletePost = (p: Post) => {
-    return p.author === currentAuthor;
-  };
-
-  const canDeleteReply = (r: Reply) => {
-    return r.author === currentAuthor;
-  };
-
-  async function onPost() {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-
-    const newPost: Post = {
-      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      type: "COMMUNITY",
-      text: trimmed,
-      createdAt: Date.now(),
-      author: currentAuthor || "Unknown",
-      replies: [],
-    };
+    await fetch(supabaseRestUrl("/announcements"), {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        scope: "community",
+        author,
+        message: text.trim(),
+      }),
+    });
 
     setText("");
-    await persist([newPost, ...posts]);
+    loadAll();
   }
 
-  async function onClearAll() {
-    Alert.alert("Clear all posts?", "This only clears this device.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Clear", style: "destructive", onPress: () => persist([]) },
-    ]);
-  }
+  async function postReply(postId: string) {
+    if (!replyText.trim()) return;
 
-  async function onDeletePost(post: Post) {
-    if (!canDeletePost(post)) {
-      Alert.alert("Not allowed", "You can only delete your own posts.");
-      return;
-    }
-
-    const doDelete = async () => {
-      const next = posts.filter((p) => p.id !== post.id);
-      await persist(next);
-    };
-
-    if (Platform.OS === "web") {
-      const ok = window.confirm("Delete this post?");
-      if (!ok) return;
-      await doDelete();
-      return;
-    }
-
-    Alert.alert("Delete this post?", "", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: doDelete },
-    ]);
-  }
-
-  function startReply(postId: string) {
-    if (replyingToPostId === postId) {
-      setReplyingToPostId(null);
-      setReplyText("");
-      return;
-    }
-    setReplyingToPostId(postId);
-    setReplyText("");
-  }
-
-  async function submitReply(postId: string) {
-    const trimmed = replyText.trim();
-    if (!trimmed) return;
-
-    const newReply: Reply = {
-      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      text: trimmed,
-      createdAt: Date.now(),
-      author: currentAuthor || "Unknown",
-    };
-
-    const next = posts.map((p) => {
-      if (p.id !== postId) return p;
-      return { ...p, replies: [...(p.replies || []), newReply] };
+    await fetch(supabaseRestUrl("/announcement_replies"), {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        announcement_id: postId,
+        author,
+        message: replyText.trim(),
+      }),
     });
 
     setReplyText("");
-    setReplyingToPostId(null);
-    await persist(next);
+    setReplyingTo(null);
+    loadAll();
   }
 
-  async function onDeleteReply(postId: string, reply: Reply) {
-    if (!canDeleteReply(reply)) {
-      Alert.alert("Not allowed", "You can only delete your own replies.");
-      return;
-    }
-
-    const doDelete = async () => {
-      const next = posts.map((p) => {
-        if (p.id !== postId) return p;
-        return { ...p, replies: (p.replies || []).filter((r) => r.id !== reply.id) };
-      });
-      await persist(next);
-    };
-
-    if (Platform.OS === "web") {
-      const ok = window.confirm("Delete this reply?");
-      if (!ok) return;
-      await doDelete();
-      return;
-    }
-
-    Alert.alert("Delete this reply?", "", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: doDelete },
-    ]);
+  async function deletePost(id: string) {
+    await fetch(supabaseRestUrl(`/announcements?id=eq.${id}`), {
+      method: "DELETE",
+      headers: supabaseHeaders(),
+    });
+    loadAll();
   }
 
-  const header = (
-    <View style={styles.headerWrap}>
-      <ThemedText type="title">Announcements</ThemedText>
+  async function deleteReply(id: string) {
+    await fetch(supabaseRestUrl(`/announcement_replies?id=eq.${id}`), {
+      method: "DELETE",
+      headers: supabaseHeaders(),
+    });
+    loadAll();
+  }
 
-      <ThemedText style={styles.subtitle}>
-        Community messages only. Official announcements are posted from Admin.
-      </ThemedText>
-
-      <View style={styles.typeRow}>
-        <View style={[styles.typePill, styles.typePillActive]}>
-          <ThemedText>Community</ThemedText>
-        </View>
-
-        <View style={{ flex: 1 }} />
-
-        <Pressable onPress={onClearAll}>
-          <ThemedText>Clear</ThemedText>
-        </Pressable>
-      </View>
-
-      <View style={styles.composer}>
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="Type a message..."
-          placeholderTextColor="#999"
-          style={styles.input}
-          multiline
-        />
-
-        <Pressable onPress={onPost} style={styles.postBtn}>
-          <ThemedText>Post</ThemedText>
-        </Pressable>
-      </View>
-    </View>
+  const sorted = useMemo(
+    () => [...posts].sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at)),
+    [posts]
   );
 
   return (
     <ThemedView style={{ flex: 1 }}>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <FlatList
-          data={sortedPosts}
+          data={sorted}
           keyExtractor={(i) => i.id}
-          ListHeaderComponent={header}
           contentContainerStyle={{ padding: 16 }}
-          renderItem={({ item }) => {
-            const isOfficial = item.author === "ADMIN";
-            return (
-              <View style={styles.card}>
-                <View style={styles.cardTopRow}>
-                  <View style={styles.leftHeaderRow}>
-                    <ThemedText type="defaultSemiBold">
-  {item.author === "ADMIN" ? "ADMIN" : "COMMUNITY"}
-</ThemedText>
+          ListHeaderComponent={
+            <View style={styles.headerWrap}>
+              <ThemedText type="title">Announcements</ThemedText>
 
+              <View style={styles.composer}>
+                <TextInput
+                  value={text}
+                  onChangeText={setText}
+                  placeholder="Type a message..."
+                  style={styles.input}
+                  multiline
+                />
+                <Pressable onPress={postAnnouncement} style={styles.postBtn}>
+                  <ThemedText>Post</ThemedText>
+                </Pressable>
+              </View>
+            </View>
+          }
+          renderItem={({ item }) => (
+            <View style={styles.card}>
+              <View style={styles.cardTopRow}>
+                <ThemedText type="defaultSemiBold">COMMUNITY</ThemedText>
+                <Pressable onPress={() => deletePost(item.id)}>
+                  <ThemedText>Delete</ThemedText>
+                </Pressable>
+              </View>
 
-                    {isOfficial ? (
-                      <View style={styles.officialBadge}>
-                        <Image
-                          source={OFFICIAL_BADGE_IMG}
-                          style={styles.officialBadgeImage}
-                        />
-                      </View>
-                    ) : null}
-                  </View>
+              <ThemedText style={styles.author}>{item.author}</ThemedText>
+              <ThemedText>{item.message}</ThemedText>
 
-                  {canDeletePost(item) ? (
-                    <Pressable onPress={() => onDeletePost(item)} style={styles.deletePill}>
-                      <ThemedText>Delete</ThemedText>
-                    </Pressable>
-                  ) : null}
-                </View>
+              <Pressable onPress={() => setReplyingTo(item.id)}>
+                <ThemedText>Reply</ThemedText>
+              </Pressable>
 
-                <ThemedText style={styles.author}>{item.author}</ThemedText>
-                <ThemedText>{item.text}</ThemedText>
-
-                <View style={styles.actionRow}>
-                  <Pressable onPress={() => startReply(item.id)} style={styles.replyPill}>
-                    <ThemedText>{replyingToPostId === item.id ? "Cancel" : "Reply"}</ThemedText>
+              {replyingTo === item.id && (
+                <View style={styles.replyComposer}>
+                  <TextInput
+                    value={replyText}
+                    onChangeText={setReplyText}
+                    placeholder="Write a reply..."
+                    style={styles.input}
+                    multiline
+                  />
+                  <Pressable onPress={() => postReply(item.id)}>
+                    <ThemedText>Post Reply</ThemedText>
                   </Pressable>
                 </View>
+              )}
 
-                {replyingToPostId === item.id ? (
-                  <View style={styles.replyComposer}>
-                    <TextInput
-                      value={replyText}
-                      onChangeText={setReplyText}
-                      placeholder="Write a reply..."
-                      placeholderTextColor="#999"
-                      style={styles.replyInput}
-                      multiline
-                    />
-                    <Pressable onPress={() => submitReply(item.id)} style={styles.replyPostBtn}>
-                      <ThemedText>Post Reply</ThemedText>
-                    </Pressable>
-                  </View>
-                ) : null}
-
-                {item.replies && item.replies.length > 0 ? (
-                  <View style={styles.repliesWrap}>
-                    {item.replies
-                      .slice()
-                      .sort((a, b) => a.createdAt - a.createdAt)
-                      .map((r) => (
-                        <View key={r.id} style={styles.replyBubble}>
-                          <View style={styles.replyTopRow}>
-                            <ThemedText style={styles.replyAuthor}>{r.author}</ThemedText>
-
-                            {canDeleteReply(r) ? (
-                              <Pressable
-                                onPress={() => onDeleteReply(item.id, r)}
-                                style={styles.replyDeletePill}
-                              >
-                                <ThemedText>Delete</ThemedText>
-                              </Pressable>
-                            ) : null}
-                          </View>
-
-                          <ThemedText style={styles.replyText}>{r.text}</ThemedText>
-                          <ThemedText style={styles.replyTime}>
-                            {formatTime(r.createdAt)}
-                          </ThemedText>
-                        </View>
-                      ))}
-                  </View>
-                ) : null}
-
-                <ThemedText style={styles.time}>{formatTime(item.createdAt)}</ThemedText>
-              </View>
-            );
-          }}
-          ListEmptyComponent={
-            loading ? null : (
-              <ThemedText style={{ opacity: 0.6, marginTop: 12 }}>
-                No posts yet. Type a message above and tap Post.
-              </ThemedText>
-            )
-          }
+              {item.replies.map((r) => (
+                <View key={r.id} style={styles.replyBubble}>
+                  <ThemedText>{r.author}</ThemedText>
+                  <ThemedText>{r.message}</ThemedText>
+                  <Pressable onPress={() => deleteReply(r.id)}>
+                    <ThemedText>Delete</ThemedText>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
         />
       </KeyboardAvoidingView>
     </ThemedView>
@@ -390,170 +213,12 @@ export default function AnnouncementsScreen() {
 
 const styles = StyleSheet.create({
   headerWrap: { gap: 10, marginBottom: 10 },
-  subtitle: { opacity: 0.8 },
-
-  typeRow: { flexDirection: "row", gap: 8, alignItems: "center" },
-
-  typePill: {
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-
-  typePillActive: { backgroundColor: "rgba(0,0,0,0.05)" },
-
-  composer: { flexDirection: "row", gap: 10, alignItems: "flex-end" },
-
-  input: {
-    flex: 1,
-    minHeight: 44,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 10,
-    color: "#000",
-  },
-
-  postBtn: {
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-
-  card: {
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    gap: 6,
-    marginTop: 10,
-  },
-
-  cardTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    justifyContent: "space-between",
-  },
-
-  leftHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-
-  officialBadge: {
-    width: 42,
-    height: 42,
-    borderRadius: 20,
-    overflow: "hidden",
-    borderWidth: 1,
-    opacity: 0.95,
-
-     shadowColor: "#00AEEF",
-  shadowOpacity: 0.9,
-  shadowRadius: 6,
-  shadowOffset: { width: 0, height: 0 },
-  elevation: 6,
-  },
-
-  officialBadgeImage: {
-    width: "100%",
-    height: "100%",
-  },
-
-  deletePill: {
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-  },
-
-  author: {
-    opacity: 0.75,
-    fontSize: 12,
-  },
-
-  actionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginTop: 2,
-  },
-
-  replyPill: {
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    alignSelf: "flex-start",
-  },
-
-  replyComposer: {
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 10,
-    gap: 10,
-    marginTop: 6,
-  },
-
-  replyInput: {
-    minHeight: 40,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 10,
-    color: "#000",
-  },
-
-  replyPostBtn: {
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    alignSelf: "flex-start",
-  },
-
-  repliesWrap: {
-    marginTop: 6,
-    gap: 8,
-    paddingLeft: 14,
-  },
-
-  replyBubble: {
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 10,
-    gap: 4,
-  },
-
-  replyTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-
-  replyAuthor: {
-    fontSize: 12,
-    opacity: 0.8,
-  },
-
-  replyDeletePill: {
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    opacity: 0.9,
-  },
-
-  replyText: {
-    fontSize: 14,
-  },
-
-  replyTime: {
-    opacity: 0.5,
-    fontSize: 11,
-  },
-
-  time: { opacity: 0.5, fontSize: 12, marginTop: 4 },
+  composer: { flexDirection: "row", gap: 10 },
+  input: { flex: 1, borderWidth: 1, borderRadius: 12, padding: 10 },
+  postBtn: { borderWidth: 1, borderRadius: 12, padding: 10 },
+  card: { borderWidth: 1, borderRadius: 12, padding: 12, gap: 6, marginTop: 10 },
+  cardTopRow: { flexDirection: "row", justifyContent: "space-between" },
+  author: { fontSize: 12, opacity: 0.7 },
+  replyComposer: { marginTop: 6, gap: 6 },
+  replyBubble: { borderWidth: 1, borderRadius: 10, padding: 8, marginTop: 6 },
 });
