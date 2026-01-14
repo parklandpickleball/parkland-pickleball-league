@@ -144,32 +144,36 @@ export default function AdminAnnouncementsScreen() {
   }
 
   async function onPost() {
-    const trimmed = text.trim();
-    if (!trimmed) return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
 
-    const res = await fetch(supabaseRestUrl("/announcements"), {
-      method: "POST",
-      headers: supabaseHeaders({ Prefer: "return=representation" }),
-      body: JSON.stringify({
-        scope: "admin",
-        author: currentAuthor,
-        message: trimmed,
-      }),
-    });
+  const res = await fetch(supabaseRestUrl("/announcements"), {
+    method: "POST",
+    headers: supabaseHeaders({ Prefer: "return=representation" }),
+    body: JSON.stringify({
+      scope: "admin",
+      author: currentAuthor,
+      message: trimmed,
+    }),
+  });
 
-    const json = await res.json().catch(() => null);
+  // ✅ SHOW STATUS EVERY TIME (so we know what's happening)
+  Alert.alert("POST status", String(res.status));
 
-    if (!res.ok) {
-      Alert.alert("Post failed", json?.message || "Unknown error");
-      return;
-    }
+  const json = await res.json().catch(() => null);
 
-    setText("");
-    await loadAll();
-
-    // ✅ ONLY admin-posted announcements trigger a notification
-    await triggerAdminPostNotification(trimmed);
+  if (!res.ok) {
+    Alert.alert("Post failed", json?.message || "Unknown error");
+    return;
   }
+
+  setText("");
+  await loadAll();
+
+  // ✅ ONLY admin-posted announcements trigger a notification
+  await triggerAdminPostNotification(trimmed);
+}
+
 
   async function onDeletePost(post: Post) {
     const doDelete = async () => {
