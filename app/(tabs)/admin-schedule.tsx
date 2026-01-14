@@ -374,6 +374,68 @@ async function bulkInsertMatchesToSupabase(matches: SavedMatch[]): Promise<void>
   }
 }
 
+// =============================
+// ✅ Supabase Division Moves
+// =============================
+type DivisionMoveRow = {
+  id: string;
+  team: string;
+  from_division: Division;
+  to_division: Division;
+  effective_week: number;
+  created_at: string;
+};
+
+async function fetchDivisionMovesFromSupabase(): Promise<DivisionMoveRow[]> {
+  const url = supabaseRestUrl('division_moves?select=*&order=created_at.desc');
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase division_moves SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as any;
+  return Array.isArray(rows) ? (rows as DivisionMoveRow[]) : [];
+}
+
+function applyDivisionMovesToTeams(
+  base: Record<Division, string[]>,
+  moves: DivisionMoveRow[],
+  currentWeek: number
+): Record<Division, string[]> {
+  const next: Record<Division, string[]> = {
+    Beginner: [...(base.Beginner ?? [])],
+    Intermediate: [...(base.Intermediate ?? [])],
+    Advanced: [...(base.Advanced ?? [])],
+  };
+
+  for (const m of moves) {
+    const team = String(m.team || '').trim();
+    const toDiv = m.to_division as Division;
+    const effWeek = Number(m.effective_week ?? 1);
+
+    if (!team || !toDiv) continue;
+    if (effWeek > currentWeek) continue;
+
+    (Object.keys(next) as Division[]).forEach((d) => {
+      next[d] = next[d].filter((t) => t !== team);
+    });
+
+    if (!next[toDiv].includes(team)) next[toDiv].push(team);
+  }
+
+  (Object.keys(next) as Division[]).forEach((d) => {
+    next[d] = uniqSorted(next[d]);
+  });
+
+  return next;
+}
+
 export default function AdminScheduleScreen() {
   const { width } = useWindowDimensions();
 
@@ -463,13 +525,72 @@ export default function AdminScheduleScreen() {
   const [time, setTime] = useState<string>(TIMES[0]);
   const [court, setCourt] = useState<number>(1);
 
-  // ✅ Merge base teams + Supabase teams + legacy local custom teams (per division)
+  const weekNum = safeInt(week, 0);
+
+  // ✅ Effective team lists (baseline + teams table + legacy custom) + APPLY division_moves
+  const [teamsByDivision, setTeamsByDivision] = useState<Record<Division, string[]>>({
+    Beginner: uniqSorted([...TEAMS_BY_DIVISION.Beginner]),
+    Intermediate: uniqSorted([...TEAMS_BY_DIVISION.Intermediate]),
+    Advanced: uniqSorted([...TEAMS_BY_DIVISION.Advanced]),
+  });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const base: Record<Division, string[]> = {
+          Beginner: uniqSorted([
+            ...(TEAMS_BY_DIVISION.Beginner ?? []),
+            ...(dbTeamNamesByDivision.Beginner ?? []),
+            ...(customTeams.Beginner ?? []),
+          ]),
+          Intermediate: uniqSorted([
+            ...(TEAMS_BY_DIVISION.Intermediate ?? []),
+            ...(dbTeamNamesByDivision.Intermediate ?? []),
+            ...(customTeams.Intermediate ?? []),
+          ]),
+          Advanced: uniqSorted([
+            ...(TEAMS_BY_DIVISION.Advanced ?? []),
+            ...(dbTeamNamesByDivision.Advanced ?? []),
+            ...(customTeams.Advanced ?? []),
+          ]),
+        };
+
+        if (weekNum <= 0) {
+          setTeamsByDivision(base);
+          return;
+        }
+
+        const moves = await fetchDivisionMovesFromSupabase();
+        const next = applyDivisionMovesToTeams(base, moves, weekNum);
+        setTeamsByDivision(next);
+      } catch {
+        // If anything fails, just show the base teams so scheduling still works
+        const fallback: Record<Division, string[]> = {
+          Beginner: uniqSorted([
+            ...(TEAMS_BY_DIVISION.Beginner ?? []),
+            ...(dbTeamNamesByDivision.Beginner ?? []),
+            ...(customTeams.Beginner ?? []),
+          ]),
+          Intermediate: uniqSorted([
+            ...(TEAMS_BY_DIVISION.Intermediate ?? []),
+            ...(dbTeamNamesByDivision.Intermediate ?? []),
+            ...(customTeams.Intermediate ?? []),
+          ]),
+          Advanced: uniqSorted([
+            ...(TEAMS_BY_DIVISION.Advanced ?? []),
+            ...(dbTeamNamesByDivision.Advanced ?? []),
+            ...(customTeams.Advanced ?? []),
+          ]),
+        };
+        setTeamsByDivision(fallback);
+      }
+    })();
+  }, [dbTeamNamesByDivision, customTeams, weekNum]);
+
+  // ✅ Teams list for the CURRENT division (already includes division_moves)
   const teams = useMemo(() => {
-    const base = TEAMS_BY_DIVISION[division] ?? [];
-    const fromSupabase = dbTeamNamesByDivision[division] ?? [];
-    const fromLocal = customTeams[division] ?? [];
-    return uniqSorted([...base, ...fromSupabase, ...fromLocal]);
-  }, [division, dbTeamNamesByDivision, customTeams]);
+    return teamsByDivision[division] ?? [];
+  }, [division, teamsByDivision]);
 
   const [teamA, setTeamA] = useState<string | null>(teams[0] ?? null);
   const [teamB, setTeamB] = useState<string | null>(teams[1] ?? null);
@@ -490,8 +611,6 @@ export default function AdminScheduleScreen() {
   // ✅ Clear Week confirmation UI
   const [showClearWeekConfirm, setShowClearWeekConfirm] = useState(false);
   const [clearWeekConfirmText, setClearWeekConfirmText] = useState('');
-
-  const weekNum = safeInt(week, 0);
 
   // ✅ Attendance map for the TYPED week (Week input field)
   const [attendance, setAttendance] = useState<AttendanceMap>({});
