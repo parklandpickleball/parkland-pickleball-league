@@ -594,9 +594,15 @@ export default function StandingsScreen() {
         else if (bp > ap) bWins += 1;
       }
 
-      // points (sum of all 3 games; blanks contribute 0)
-      const aPF = aRaw.reduce((sum, v) => sum + toN(v), 0);
-      const bPF = bRaw.reduce((sum, v) => sum + toN(v), 0);
+      // ✅ points should ONLY count games that are fully entered (both teams have a score)
+      let aPF = 0;
+      let bPF = 0;
+
+      for (let i = 0; i < 3; i++) {
+        if (!gameEnteredPair(aRaw[i], bRaw[i])) continue;
+        aPF += toN(aRaw[i]);
+        bPF += toN(bRaw[i]);
+      }
 
       addTotals(totals, {
         team: m.teamA,
