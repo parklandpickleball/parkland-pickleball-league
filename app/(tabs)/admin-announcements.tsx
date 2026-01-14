@@ -1,37 +1,37 @@
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabaseHeaders, supabaseRestUrl } from "@/constants/supabase";
 import * as Notifications from "expo-notifications";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-    Alert,
-    FlatList,
-    Image,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    StyleSheet,
-    TextInput,
-    View,
+  Alert,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
 } from "react-native";
 
-type Reply = {
+type ReplyRow = {
   id: string;
-  text: string;
-  createdAt: number;
+  announcement_id: string;
   author: string;
+  message: string;
+  created_at: string;
 };
 
-type Post = {
+type AnnouncementRow = {
   id: string;
-  type: "COMMUNITY";
-  text: string;
-  createdAt: number;
+  scope: "admin" | "community";
   author: string;
-  replies: Reply[];
+  message: string;
+  created_at: string;
 };
 
-const STORAGE_KEY = "ppl_announcements_posts_v1";
+type Post = AnnouncementRow & { replies: ReplyRow[] };
 
 // ✅ OFFICIAL badge image (Season 3 logo)
 const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo.png");
@@ -41,7 +41,7 @@ export default function AdminAnnouncementsScreen() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [text, setText] = useState("");
 
-  // Admin identity (admin posts are always authored as ADMIN)
+  // Admin identity
   const currentAuthor = "ADMIN";
 
   // Inline reply UI state (one post at a time)
@@ -49,81 +49,75 @@ export default function AdminAnnouncementsScreen() {
   const [replyText, setReplyText] = useState("");
 
   useEffect(() => {
-    let mounted = true;
-
-    (async () => {
-      try {
-        const rawPosts = await AsyncStorage.getItem(STORAGE_KEY);
-        const parsed: any = rawPosts ? JSON.parse(rawPosts) : [];
-        const list = Array.isArray(parsed) ? parsed : [];
-
-        // Normalize posts + replies (back-compat safe)
-        const normalized: Post[] = list.map((p: any) => {
-          const author =
-            typeof p.author === "string" && p.author.trim() ? p.author : "Unknown";
-
-          const repliesRaw = Array.isArray(p.replies) ? p.replies : [];
-          const replies: Reply[] = repliesRaw.map((r: any) => ({
-            id: String(r.id ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`),
-            text: String(r.text ?? ""),
-            createdAt: Number(r.createdAt ?? Date.now()),
-            author:
-              typeof r.author === "string" && r.author.trim() ? r.author : "Unknown",
-          }));
-
-          return {
-            id: String(p.id),
-            type: "COMMUNITY",
-            text: String(p.text ?? ""),
-            createdAt: Number(p.createdAt ?? Date.now()),
-            author,
-            replies,
-          };
-        });
-
-        if (mounted) setPosts(normalized);
-      } catch {
-        if (mounted) setPosts([]);
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    })();
-
-    return () => {
-      mounted = false;
-    };
+    loadAll();
   }, []);
 
-  async function persist(next: Post[]) {
-    setPosts(next);
+  async function loadAll() {
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      setLoading(true);
+
+      const aUrl = supabaseRestUrl(
+        "/announcements?select=*&scope=eq.admin&order=created_at.desc"
+      );
+      const aRes = await fetch(aUrl, { headers: supabaseHeaders() });
+      const aJson = await aRes.json();
+
+      if (!aRes.ok) {
+        Alert.alert("Load failed", aJson?.message || "Unknown error");
+        setPosts([]);
+        return;
+      }
+
+      const ann = Array.isArray(aJson) ? (aJson as AnnouncementRow[]) : [];
+      if (ann.length === 0) {
+        setPosts([]);
+        return;
+      }
+
+      const ids = ann.map((a) => a.id).join(",");
+      const rUrl = supabaseRestUrl(
+        `/announcement_replies?select=*&announcement_id=in.(${ids})&order=created_at.asc`
+      );
+      const rRes = await fetch(rUrl, { headers: supabaseHeaders() });
+      const rJson = await rRes.json();
+
+      let replies: ReplyRow[] = [];
+      if (rRes.ok) {
+        replies = Array.isArray(rJson) ? (rJson as ReplyRow[]) : [];
+      }
+
+      const grouped: Record<string, ReplyRow[]> = {};
+      for (const r of replies) {
+        if (!grouped[r.announcement_id]) grouped[r.announcement_id] = [];
+        grouped[r.announcement_id].push(r);
+      }
+
+      setPosts(
+        ann.map((a) => ({
+          ...a,
+          replies: grouped[a.id] || [],
+        }))
+      );
     } catch {
-      Alert.alert("Save failed", "Could not save posts.");
+      setPosts([]);
+    } finally {
+      setLoading(false);
     }
   }
 
-  const sortedPosts = useMemo(
-    () => [...posts].sort((a, b) => b.createdAt - a.createdAt),
-    [posts]
-  );
-
-  function formatTime(ms: number) {
-    return new Date(ms).toLocaleString();
+  function formatTime(iso: string) {
+    return new Date(iso).toLocaleString();
   }
 
   // ✅ Admin screen: admin can delete ANY post/reply
   const canDeletePost = (_p: Post) => true;
-  const canDeleteReply = (_r: Reply) => true;
+  const canDeleteReply = (_r: ReplyRow) => true;
 
   // 🔔 Admin-post notification trigger (ADMIN POSTS ONLY)
-  // ✅ SDK 54-safe: uses scheduleNotificationAsync(trigger:null)
   async function triggerAdminPostNotification(message: string) {
     try {
-      // Never on web
       if (Platform.OS === "web") return;
 
-      // Ensure permission (local notifications on iOS still require permission)
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
 
@@ -132,10 +126,7 @@ export default function AdminAnnouncementsScreen() {
         finalStatus = req.status;
       }
 
-      if (finalStatus !== "granted") {
-        // Permission denied → do nothing (no blocking)
-        return;
-      }
+      if (finalStatus !== "granted") return;
 
       const body = message.length > 120 ? message.slice(0, 117) + "..." : message;
 
@@ -145,7 +136,7 @@ export default function AdminAnnouncementsScreen() {
           body,
           sound: "default",
         },
-        trigger: null, // immediate (foreground-safe with handler in _layout)
+        trigger: null,
       });
     } catch {
       // silent fail
@@ -156,17 +147,25 @@ export default function AdminAnnouncementsScreen() {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    const newPost: Post = {
-      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      type: "COMMUNITY",
-      text: trimmed,
-      createdAt: Date.now(),
-      author: currentAuthor, // ✅ ADMIN posts only from here
-      replies: [],
-    };
+    const res = await fetch(supabaseRestUrl("/announcements"), {
+      method: "POST",
+      headers: supabaseHeaders({ Prefer: "return=representation" }),
+      body: JSON.stringify({
+        scope: "admin",
+        author: currentAuthor,
+        message: trimmed,
+      }),
+    });
+
+    const json = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      Alert.alert("Post failed", json?.message || "Unknown error");
+      return;
+    }
 
     setText("");
-    await persist([newPost, ...posts]);
+    await loadAll();
 
     // ✅ ONLY admin-posted announcements trigger a notification
     await triggerAdminPostNotification(trimmed);
@@ -174,8 +173,18 @@ export default function AdminAnnouncementsScreen() {
 
   async function onDeletePost(post: Post) {
     const doDelete = async () => {
-      const next = posts.filter((p) => p.id !== post.id);
-      await persist(next);
+      const res = await fetch(supabaseRestUrl(`/announcements?id=eq.${post.id}`), {
+        method: "DELETE",
+        headers: supabaseHeaders(),
+      });
+
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        Alert.alert("Delete failed", j?.message || "Unknown error");
+        return;
+      }
+
+      await loadAll();
     };
 
     if (Platform.OS === "web") {
@@ -205,32 +214,45 @@ export default function AdminAnnouncementsScreen() {
     const trimmed = replyText.trim();
     if (!trimmed) return;
 
-    const newReply: Reply = {
-      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      text: trimmed,
-      createdAt: Date.now(),
-      author: currentAuthor, // replies from admin screen are ADMIN
-    };
-
-    const next = posts.map((p) => {
-      if (p.id !== postId) return p;
-      return { ...p, replies: [...(p.replies || []), newReply] };
+    const res = await fetch(supabaseRestUrl("/announcement_replies"), {
+      method: "POST",
+      headers: supabaseHeaders({ Prefer: "return=representation" }),
+      body: JSON.stringify({
+        announcement_id: postId,
+        author: currentAuthor,
+        message: trimmed,
+      }),
     });
+
+    const json = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      Alert.alert("Reply failed", json?.message || "Unknown error");
+      return;
+    }
 
     setReplyText("");
     setReplyingToPostId(null);
-    await persist(next);
-
-    // 🚫 IMPORTANT: Replies do NOT trigger notifications
+    await loadAll();
   }
 
-  async function onDeleteReply(postId: string, reply: Reply) {
+  async function onDeleteReply(_postId: string, reply: ReplyRow) {
     const doDelete = async () => {
-      const next = posts.map((p) => {
-        if (p.id !== postId) return p;
-        return { ...p, replies: (p.replies || []).filter((r) => r.id !== reply.id) };
-      });
-      await persist(next);
+      const res = await fetch(
+        supabaseRestUrl(`/announcement_replies?id=eq.${reply.id}`),
+        {
+          method: "DELETE",
+          headers: supabaseHeaders(),
+        }
+      );
+
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        Alert.alert("Delete failed", j?.message || "Unknown error");
+        return;
+      }
+
+      await loadAll();
     };
 
     if (Platform.OS === "web") {
@@ -245,6 +267,11 @@ export default function AdminAnnouncementsScreen() {
       { text: "Delete", style: "destructive", onPress: doDelete },
     ]);
   }
+
+  const sortedPosts = useMemo(
+    () => [...posts].sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at)),
+    [posts]
+  );
 
   const header = (
     <View style={styles.headerWrap}>
@@ -292,13 +319,19 @@ export default function AdminAnnouncementsScreen() {
 
                     {isAdminPost ? (
                       <View style={styles.officialBadge}>
-                        <Image source={OFFICIAL_BADGE_IMG} style={styles.officialBadgeImage} />
+                        <Image
+                          source={OFFICIAL_BADGE_IMG}
+                          style={styles.officialBadgeImage}
+                        />
                       </View>
                     ) : null}
                   </View>
 
                   {canDeletePost(item) ? (
-                    <Pressable onPress={() => onDeletePost(item)} style={styles.deletePill}>
+                    <Pressable
+                      onPress={() => onDeletePost(item)}
+                      style={styles.deletePill}
+                    >
                       <ThemedText>Delete</ThemedText>
                     </Pressable>
                   ) : null}
@@ -306,11 +339,16 @@ export default function AdminAnnouncementsScreen() {
 
                 <ThemedText style={styles.author}>{displayAuthor}</ThemedText>
 
-                <ThemedText>{item.text}</ThemedText>
+                <ThemedText>{item.message}</ThemedText>
 
                 <View style={styles.actionRow}>
-                  <Pressable onPress={() => startReply(item.id)} style={styles.replyPill}>
-                    <ThemedText>{replyingToPostId === item.id ? "Cancel" : "Reply"}</ThemedText>
+                  <Pressable
+                    onPress={() => startReply(item.id)}
+                    style={styles.replyPill}
+                  >
+                    <ThemedText>
+                      {replyingToPostId === item.id ? "Cancel" : "Reply"}
+                    </ThemedText>
                   </Pressable>
                 </View>
 
@@ -324,7 +362,10 @@ export default function AdminAnnouncementsScreen() {
                       style={styles.replyInput}
                       multiline
                     />
-                    <Pressable onPress={() => submitReply(item.id)} style={styles.replyPostBtn}>
+                    <Pressable
+                      onPress={() => submitReply(item.id)}
+                      style={styles.replyPostBtn}
+                    >
                       <ThemedText>Post Reply</ThemedText>
                     </Pressable>
                   </View>
@@ -332,32 +373,31 @@ export default function AdminAnnouncementsScreen() {
 
                 {item.replies && item.replies.length > 0 ? (
                   <View style={styles.repliesWrap}>
-                    {item.replies
-                      .slice()
-                      .sort((a, b) => a.createdAt - b.createdAt)
-                      .map((r) => (
-                        <View key={r.id} style={styles.replyBubble}>
-                          <View style={styles.replyTopRow}>
-                            <ThemedText style={styles.replyAuthor}>{r.author}</ThemedText>
+                    {item.replies.map((r) => (
+                      <View key={r.id} style={styles.replyBubble}>
+                        <View style={styles.replyTopRow}>
+                          <ThemedText style={styles.replyAuthor}>{r.author}</ThemedText>
 
-                            {canDeleteReply(r) ? (
-                              <Pressable
-                                onPress={() => onDeleteReply(item.id, r)}
-                                style={styles.replyDeletePill}
-                              >
-                                <ThemedText>Delete</ThemedText>
-                              </Pressable>
-                            ) : null}
-                          </View>
-
-                          <ThemedText style={styles.replyText}>{r.text}</ThemedText>
-                          <ThemedText style={styles.replyTime}>{formatTime(r.createdAt)}</ThemedText>
+                          {canDeleteReply(r) ? (
+                            <Pressable
+                              onPress={() => onDeleteReply(item.id, r)}
+                              style={styles.replyDeletePill}
+                            >
+                              <ThemedText>Delete</ThemedText>
+                            </Pressable>
+                          ) : null}
                         </View>
-                      ))}
+
+                        <ThemedText style={styles.replyText}>{r.message}</ThemedText>
+                        <ThemedText style={styles.replyTime}>
+                          {formatTime(r.created_at)}
+                        </ThemedText>
+                      </View>
+                    ))}
                   </View>
                 ) : null}
 
-                <ThemedText style={styles.time}>{formatTime(item.createdAt)}</ThemedText>
+                <ThemedText style={styles.time}>{formatTime(item.created_at)}</ThemedText>
               </View>
             );
           }}
