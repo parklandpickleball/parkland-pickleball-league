@@ -706,6 +706,7 @@ try {
     });
   }, [matches, scores, baseRows, divisionMoves, dbTeams, supabaseDivisionByTeam, baselineHasStats]);
 
+  console.log('DIVISION MOVES FROM SUPABASE:', divisionMoves);
   const standingsInfoText = useMemo(() => {
     if (baselineHasStats) {
       return `Standings are based on: Week 1 baseline + verified scores from Week ${START_WEEK_FOR_AUTOCALC}+ (synced via Supabase).`;
