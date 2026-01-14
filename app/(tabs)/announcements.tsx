@@ -1,6 +1,7 @@
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import { supabaseHeaders, supabaseRestUrl } from "@/constants/supabase";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   FlatList,
@@ -30,25 +31,49 @@ type Post = {
   replies: Reply[];
 };
 
-const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo.png");
+// ✅ Correct badge image file
+const OFFICIAL_BADGE_IMG = require("../../assets/images/ppl-season3-logo 2.png");
 
 export default function AnnouncementsScreen() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [text, setText] = useState("");
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
-  const author = "Community";
+
+  // ✅ This should become: "Brandon (Brandon/Ikewa)"
+  const [currentAuthor, setCurrentAuthor] = useState<string>("Community");
 
   useEffect(() => {
-    loadAll();
+    (async () => {
+      await loadAuthor();
+      await loadAll();
+    })();
   }, []);
 
+  async function loadAuthor() {
+    try {
+      // ✅ THESE are the real keys from your screenshot
+      const name = (await AsyncStorage.getItem("ppl_selected_player_name"))?.trim() || "";
+      const team = (await AsyncStorage.getItem("ppl_selected_team"))?.trim() || "";
+
+      if (name && team) {
+        setCurrentAuthor(`${name} (${team})`);
+        return;
+      }
+      if (name) {
+        setCurrentAuthor(name);
+        return;
+      }
+
+      setCurrentAuthor("Community");
+    } catch {
+      setCurrentAuthor("Community");
+    }
+  }
+
   async function loadAll() {
-    // ✅ COMMUNITY feed shows BOTH community + admin announcements
     const res = await fetch(
-      supabaseRestUrl(
-        "/announcements?scope=in.(community,admin)&order=created_at.desc"
-      ),
+      supabaseRestUrl("/announcements?scope=in.(community,admin)&order=created_at.desc"),
       { headers: supabaseHeaders() }
     );
     const announcements = await res.json();
@@ -61,9 +86,7 @@ export default function AnnouncementsScreen() {
     const ids = announcements.map((a) => a.id).join(",");
 
     const replyRes = await fetch(
-      supabaseRestUrl(
-        `/announcement_replies?announcement_id=in.(${ids})&order=created_at.asc`
-      ),
+      supabaseRestUrl(`/announcement_replies?announcement_id=in.(${ids})&order=created_at.asc`),
       { headers: supabaseHeaders() }
     );
     const replies: Reply[] = await replyRes.json();
@@ -92,7 +115,7 @@ export default function AnnouncementsScreen() {
       headers: supabaseHeaders(),
       body: JSON.stringify({
         scope: "community",
-        author,
+        author: currentAuthor, // ✅ now uses Brandon (Team)
         message: text.trim(),
       }),
     });
@@ -109,7 +132,7 @@ export default function AnnouncementsScreen() {
       headers: supabaseHeaders(),
       body: JSON.stringify({
         announcement_id: postId,
-        author,
+        author: currentAuthor, // ✅ now uses Brandon (Team)
         message: replyText.trim(),
       }),
     });
@@ -136,18 +159,13 @@ export default function AnnouncementsScreen() {
   }
 
   const sorted = useMemo(
-    () =>
-      [...posts].sort(
-        (a, b) => +new Date(b.created_at) - +new Date(a.created_at)
-      ),
+    () => [...posts].sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at)),
     [posts]
   );
 
   return (
     <ThemedView style={{ flex: 1 }}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <FlatList
           data={sorted}
           keyExtractor={(i) => i.id}
@@ -171,21 +189,19 @@ export default function AnnouncementsScreen() {
             </View>
           }
           renderItem={({ item }) => {
-            const isAdmin = item.scope === "admin";
+            const isAdminPost = item.scope === "admin";
 
             return (
               <View style={styles.card}>
                 <View style={styles.cardTopRow}>
-                  <View style={styles.badgeRow}>
-                    {isAdmin ? (
-                      <View style={styles.adminBadge}>
-                        <Image source={OFFICIAL_BADGE_IMG} style={styles.badgeImg} />
-                        <ThemedText type="defaultSemiBold">ADMIN</ThemedText>
-                      </View>
-                    ) : (
-                      <ThemedText type="defaultSemiBold">COMMUNITY</ThemedText>
-                    )}
-                  </View>
+                  {isAdminPost ? (
+                    <View style={styles.adminBadge}>
+                      <Image source={OFFICIAL_BADGE_IMG} style={styles.badgeImg} />
+                      <ThemedText type="defaultSemiBold">ADMIN</ThemedText>
+                    </View>
+                  ) : (
+                    <ThemedText type="defaultSemiBold">COMMUNITY</ThemedText>
+                  )}
 
                   <Pressable onPress={() => deletePost(item.id)}>
                     <ThemedText>Delete</ThemedText>
@@ -214,15 +230,30 @@ export default function AnnouncementsScreen() {
                   </View>
                 )}
 
-                {item.replies.map((r) => (
-                  <View key={r.id} style={styles.replyBubble}>
-                    <ThemedText>{r.author}</ThemedText>
-                    <ThemedText>{r.message}</ThemedText>
-                    <Pressable onPress={() => deleteReply(r.id)}>
-                      <ThemedText>Delete</ThemedText>
-                    </Pressable>
-                  </View>
-                ))}
+                {item.replies.map((r) => {
+                  const isAdminReply = r.author === "ADMIN";
+
+                  return (
+                    <View key={r.id} style={styles.replyBubble}>
+                      <View style={styles.replyTopRow}>
+                        {isAdminReply ? (
+                          <View style={styles.adminBadge}>
+                            <Image source={OFFICIAL_BADGE_IMG} style={styles.badgeImg} />
+                            <ThemedText type="defaultSemiBold">ADMIN</ThemedText>
+                          </View>
+                        ) : (
+                          <ThemedText>{r.author}</ThemedText>
+                        )}
+
+                        <Pressable onPress={() => deleteReply(r.id)}>
+                          <ThemedText>Delete</ThemedText>
+                        </Pressable>
+                      </View>
+
+                      <ThemedText>{r.message}</ThemedText>
+                    </View>
+                  );
+                })}
               </View>
             );
           }}
@@ -241,10 +272,10 @@ const styles = StyleSheet.create({
   cardTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   author: { fontSize: 12, opacity: 0.7 },
 
-  badgeRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   adminBadge: { flexDirection: "row", alignItems: "center", gap: 8 },
   badgeImg: { width: 18, height: 18, borderRadius: 9 },
 
   replyComposer: { marginTop: 6, gap: 6 },
   replyBubble: { borderWidth: 1, borderRadius: 10, padding: 8, marginTop: 6 },
+  replyTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
 });
