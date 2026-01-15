@@ -11,6 +11,50 @@ const PLAYER_NAME_KEY = 'ppl_selected_player_name'; // e.g. "Ishai" or "Greg"
 
 type Division = 'Beginner' | 'Intermediate' | 'Advanced';
 
+const BASE_TEAMS: Record<Division, string[]> = {
+  Advanced: [
+    'Ishai/Greg',
+    'Adam/Jon',
+    'Bradley/Ben',
+    'Peter/Ray',
+    'Andrew/Brent',
+    'Mark D/Craig',
+    'Alex/Anibal',
+    'Radek/Alexi',
+    'Ricky/John',
+    'Brandon/Ikewa',
+    'Andrew/Dan',
+    'Eric/Meir',
+    'David/Guy',
+    'Mark P/Matt O',
+  ],
+  Intermediate: [
+    'Ashley/Julie',
+    'Stephanie/Misty',
+    'Eric/Sunil',
+    'Dan/Relu',
+    'Domencio/Keith',
+    'YG/Haaris',
+    'Nicole/Joshua',
+    'Amy/Nik',
+    'Elaine/Valerie',
+    'Marat/Marta',
+    'Beatriz/Joe',
+    'Alejandro/William',
+  ],
+  Beginner: [
+    'Eric/Tracy',
+    'Rachel/Jaime',
+    'Amy/Ellen',
+    'Lashonda/Lynette',
+    'Michael/JP',
+    'Fran/Scott',
+    'Robert/Adam',
+    'Cynthia/Maureen',
+    'Marina/Sharon',
+  ],
+};
+
 type SupabaseTeamRow = {
   id: string;
   created_at: string;
@@ -31,7 +75,7 @@ function uniqSorted(list: string[]) {
 }
 
 async function fetchTeamsFromSupabase(): Promise<Record<Division, string[]>> {
-  const url = supabaseRestUrl('teams?select=id,created_at,division,name&order=created_at.asc');
+  const url = supabaseRestUrl('teams?select=division,name&order=created_at.asc');
 
   const res = await fetch(url, {
     method: 'GET',
@@ -40,7 +84,7 @@ async function fetchTeamsFromSupabase(): Promise<Record<Division, string[]>> {
 
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
-    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+    throw new Error(`Supabase teams SELECT failed: ${res.status} ${txt}`);
   }
 
   const rows = (await res.json()) as SupabaseTeamRow[];
@@ -52,46 +96,48 @@ async function fetchTeamsFromSupabase(): Promise<Record<Division, string[]>> {
   };
 
   for (const r of rows) {
-    if (!isDivision(r.division)) continue;
-    grouped[r.division].push(String(r.name || '').trim());
+    if (isDivision(r.division)) grouped[r.division].push(String(r.name || '').trim());
   }
 
-  grouped.Advanced = uniqSorted(grouped.Advanced);
-  grouped.Intermediate = uniqSorted(grouped.Intermediate);
-  grouped.Beginner = uniqSorted(grouped.Beginner);
-
-  return grouped;
+  return {
+    Advanced: uniqSorted(grouped.Advanced),
+    Intermediate: uniqSorted(grouped.Intermediate),
+    Beginner: uniqSorted(grouped.Beginner),
+  };
 }
 
 export default function TeamSelectScreen() {
   const router = useRouter();
 
-  const [loading, setLoading] = useState(true);
-  const [teamsByDivision, setTeamsByDivision] = useState<Record<Division, string[]>>({
+  const [pendingTeam, setPendingTeam] = useState<string | null>(null);
+
+  // ✅ Supabase team names (may contain only “newly added” teams)
+  const [dbTeams, setDbTeams] = useState<Record<Division, string[]>>({
     Advanced: [],
     Intermediate: [],
     Beginner: [],
   });
 
-  const [pendingTeam, setPendingTeam] = useState<string | null>(null);
-
   useEffect(() => {
     (async () => {
       try {
         const grouped = await fetchTeamsFromSupabase();
-        setTeamsByDivision(grouped);
-      } catch (e: any) {
-        // If this fails, show a clear message rather than silently showing stale/hardcoded data
-        Alert.alert(
-          'Teams not loading',
-          'Could not load teams from the server. Please try again in a moment.'
-        );
-        setTeamsByDivision({ Advanced: [], Intermediate: [], Beginner: [] });
-      } finally {
-        setLoading(false);
+        setDbTeams(grouped);
+      } catch {
+        // If Supabase fails, we still show baseline teams (no crash)
+        setDbTeams({ Advanced: [], Intermediate: [], Beginner: [] });
       }
     })();
   }, []);
+
+  // ✅ FINAL teams = baseline + supabase
+  const teamsByDivision = useMemo(() => {
+    return {
+      Advanced: uniqSorted([...(BASE_TEAMS.Advanced ?? []), ...(dbTeams.Advanced ?? [])]),
+      Intermediate: uniqSorted([...(BASE_TEAMS.Intermediate ?? []), ...(dbTeams.Intermediate ?? [])]),
+      Beginner: uniqSorted([...(BASE_TEAMS.Beginner ?? []), ...(dbTeams.Beginner ?? [])]),
+    };
+  }, [dbTeams]);
 
   const pendingPlayers = useMemo(() => {
     if (!pendingTeam) return null;
@@ -104,7 +150,6 @@ export default function TeamSelectScreen() {
 
   const beginChooseTeam = (team: string) => setPendingTeam(team);
 
-  // ✅ Always route through root to guarantee valid tab context
   const goIntoApp = () => {
     router.replace('/');
   };
@@ -140,18 +185,12 @@ export default function TeamSelectScreen() {
 
   const cancelPlayerPick = () => setPendingTeam(null);
 
-  const advanced = teamsByDivision.Advanced ?? [];
-  const intermediate = teamsByDivision.Intermediate ?? [];
-  const beginner = teamsByDivision.Beginner ?? [];
-
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
       <Text style={styles.title}>Choose Your Team</Text>
       <Text style={styles.subtitle}>
         You will only be able to enter scores for games your team is playing.
       </Text>
-
-      {loading ? <Text style={{ marginBottom: 14 }}>Loading teams…</Text> : null}
 
       {pendingTeam && pendingPlayers ? (
         <View style={styles.pickerBox}>
@@ -168,9 +207,7 @@ export default function TeamSelectScreen() {
               style={[styles.pickerBtn, { backgroundColor: pendingPlayers.p2 ? 'black' : '#999' }]}
               disabled={!pendingPlayers.p2}
             >
-              <Text style={[styles.pickerBtnText, { color: 'white' }]}>
-                {pendingPlayers.p2 || 'N/A'}
-              </Text>
+              <Text style={[styles.pickerBtnText, { color: 'white' }]}>{pendingPlayers.p2 || 'N/A'}</Text>
             </Pressable>
 
             <Pressable onPress={cancelPlayerPick} style={[styles.pickerBtn, styles.cancelBtn]}>
@@ -181,37 +218,25 @@ export default function TeamSelectScreen() {
       ) : null}
 
       <Text style={styles.division}>Advanced Division</Text>
-      {advanced.length === 0 ? (
-        <Text style={{ color: '#444', marginBottom: 10 }}>No teams found.</Text>
-      ) : (
-        advanced.map((team) => (
-          <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
-            <Text style={styles.buttonText}>{team}</Text>
-          </Pressable>
-        ))
-      )}
+      {teamsByDivision.Advanced.map((team) => (
+        <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
+          <Text style={styles.buttonText}>{team}</Text>
+        </Pressable>
+      ))}
 
       <Text style={styles.division}>Intermediate Division</Text>
-      {intermediate.length === 0 ? (
-        <Text style={{ color: '#444', marginBottom: 10 }}>No teams found.</Text>
-      ) : (
-        intermediate.map((team) => (
-          <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
-            <Text style={styles.buttonText}>{team}</Text>
-          </Pressable>
-        ))
-      )}
+      {teamsByDivision.Intermediate.map((team) => (
+        <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
+          <Text style={styles.buttonText}>{team}</Text>
+        </Pressable>
+      ))}
 
       <Text style={styles.division}>Beginner Division</Text>
-      {beginner.length === 0 ? (
-        <Text style={{ color: '#444', marginBottom: 10 }}>No teams found.</Text>
-      ) : (
-        beginner.map((team) => (
-          <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
-            <Text style={styles.buttonText}>{team}</Text>
-          </Pressable>
-        ))
-      )}
+      {teamsByDivision.Beginner.map((team) => (
+        <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
+          <Text style={styles.buttonText}>{team}</Text>
+        </Pressable>
+      ))}
     </ScrollView>
   );
 }
