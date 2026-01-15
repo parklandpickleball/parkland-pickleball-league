@@ -14,12 +14,16 @@ export default function LeagueLockScreen() {
     const check = async () => {
       const unlocked = await AsyncStorage.getItem(LEAGUE_UNLOCK_KEY);
       if (unlocked === 'true') {
-        // ✅ Send to root so tabs context is guaranteed
         router.replace('/');
       }
     };
     void check();
   }, [router]);
+
+  const unlockAndEnter = async () => {
+    await AsyncStorage.setItem(LEAGUE_UNLOCK_KEY, 'true');
+    router.replace('/');
+  };
 
   const onUnlock = async () => {
     const cleaned = (code || '').trim();
@@ -34,10 +38,12 @@ export default function LeagueLockScreen() {
       return;
     }
 
-    await AsyncStorage.setItem(LEAGUE_UNLOCK_KEY, 'true');
+    await unlockAndEnter();
+  };
 
-    // ✅ Always go through root to avoid Unmatched Route during review
-    router.replace('/');
+  // ✅ This is the "Demo Mode" Apple expects based on your review notes
+  const onEnterDemoMode = async () => {
+    await unlockAndEnter();
   };
 
   return (
@@ -48,6 +54,26 @@ export default function LeagueLockScreen() {
 
       <Text style={{ color: '#333', marginBottom: 18, fontWeight: '600' }}>
         Enter the league access code to continue.
+      </Text>
+
+      {/* ✅ DEMO MODE BUTTON (what Apple is looking for) */}
+      <Pressable
+        onPress={onEnterDemoMode}
+        style={{
+          backgroundColor: '#0A7AFF',
+          paddingVertical: 14,
+          borderRadius: 12,
+          alignItems: 'center',
+          marginBottom: 14,
+        }}
+      >
+        <Text style={{ color: 'white', fontWeight: '900', fontSize: 16 }}>
+          Enter Demo Mode
+        </Text>
+      </Pressable>
+
+      <Text style={{ color: '#666', marginBottom: 10 }}>
+        Or enter the league access code:
       </Text>
 
       <TextInput

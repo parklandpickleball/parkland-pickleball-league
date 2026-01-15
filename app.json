@@ -8,14 +8,17 @@
     "scheme": "parklandpickleballleague",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.parklandpickleballleague.app",
-      "buildNumber": "3",
+      "buildNumber": "4",
+      "icon": "./assets/images/icon.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
+
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -27,10 +30,12 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.parklandpickleballleague.app"
     },
+
     "web": {
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+
     "plugins": [
       "expo-router",
       [
@@ -46,16 +51,19 @@
         }
       ]
     ],
+
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
     },
+
     "extra": {
       "router": {},
       "eas": {
         "projectId": "5f44dcfc-df42-4192-835a-ad5c65cb16ff"
       }
     },
+
     "owner": "breich99"
   }
 }
