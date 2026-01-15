@@ -1,16 +1,97 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+
+import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
 
 const TEAM_KEY = 'ppl_selected_team';
 const PLAYER_INDEX_KEY = 'ppl_selected_player_index'; // "1" or "2"
-const PLAYER_NAME_KEY = 'ppl_selected_player_name';   // e.g. "Ishai" or "Greg"
+const PLAYER_NAME_KEY = 'ppl_selected_player_name'; // e.g. "Ishai" or "Greg"
+
+type Division = 'Beginner' | 'Intermediate' | 'Advanced';
+
+type SupabaseTeamRow = {
+  id: string;
+  created_at: string;
+  division: string;
+  name: string;
+};
+
+function isDivision(v: any): v is Division {
+  return v === 'Beginner' || v === 'Intermediate' || v === 'Advanced';
+}
+
+function uniqSorted(list: string[]) {
+  const set = new Set<string>();
+  for (const t of list) set.add((t || '').trim());
+  return Array.from(set)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function fetchTeamsFromSupabase(): Promise<Record<Division, string[]>> {
+  const url = supabaseRestUrl('teams?select=id,created_at,division,name&order=created_at.asc');
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: supabaseHeaders(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
+  }
+
+  const rows = (await res.json()) as SupabaseTeamRow[];
+
+  const grouped: Record<Division, string[]> = {
+    Advanced: [],
+    Intermediate: [],
+    Beginner: [],
+  };
+
+  for (const r of rows) {
+    if (!isDivision(r.division)) continue;
+    grouped[r.division].push(String(r.name || '').trim());
+  }
+
+  grouped.Advanced = uniqSorted(grouped.Advanced);
+  grouped.Intermediate = uniqSorted(grouped.Intermediate);
+  grouped.Beginner = uniqSorted(grouped.Beginner);
+
+  return grouped;
+}
 
 export default function TeamSelectScreen() {
   const router = useRouter();
 
+  const [loading, setLoading] = useState(true);
+  const [teamsByDivision, setTeamsByDivision] = useState<Record<Division, string[]>>({
+    Advanced: [],
+    Intermediate: [],
+    Beginner: [],
+  });
+
   const [pendingTeam, setPendingTeam] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const grouped = await fetchTeamsFromSupabase();
+        setTeamsByDivision(grouped);
+      } catch (e: any) {
+        // If this fails, show a clear message rather than silently showing stale/hardcoded data
+        Alert.alert(
+          'Teams not loading',
+          'Could not load teams from the server. Please try again in a moment.'
+        );
+        setTeamsByDivision({ Advanced: [], Intermediate: [], Beginner: [] });
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
 
   const pendingPlayers = useMemo(() => {
     if (!pendingTeam) return null;
@@ -35,7 +116,7 @@ export default function TeamSelectScreen() {
       await AsyncStorage.setItem(PLAYER_NAME_KEY, playerName);
 
       goIntoApp();
-    } catch (e) {
+    } catch {
       Alert.alert('Error', 'Could not save your team choice. Please try again.');
     }
   };
@@ -59,12 +140,18 @@ export default function TeamSelectScreen() {
 
   const cancelPlayerPick = () => setPendingTeam(null);
 
+  const advanced = teamsByDivision.Advanced ?? [];
+  const intermediate = teamsByDivision.Intermediate ?? [];
+  const beginner = teamsByDivision.Beginner ?? [];
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
       <Text style={styles.title}>Choose Your Team</Text>
       <Text style={styles.subtitle}>
         You will only be able to enter scores for games your team is playing.
       </Text>
+
+      {loading ? <Text style={{ marginBottom: 14 }}>Loading teams…</Text> : null}
 
       {pendingTeam && pendingPlayers ? (
         <View style={styles.pickerBox}>
@@ -94,63 +181,37 @@ export default function TeamSelectScreen() {
       ) : null}
 
       <Text style={styles.division}>Advanced Division</Text>
-      {[
-        'Ishai/Greg',
-        'Adam/Jon',
-        'Bradley/Ben',
-        'Peter/Ray',
-        'Andrew/Brent',
-        'Mark D/Craig',
-        'Alex/Anibal',
-        'Radek/Alexi',
-        'Ricky/John',
-        'Brandon/Ikewa',
-        'Andrew/Dan',
-        'Eric/Meir',
-        'David/Guy',
-        'Mark P/Matt O',
-      ].map((team) => (
-        <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
-          <Text style={styles.buttonText}>{team}</Text>
-        </Pressable>
-      ))}
+      {advanced.length === 0 ? (
+        <Text style={{ color: '#444', marginBottom: 10 }}>No teams found.</Text>
+      ) : (
+        advanced.map((team) => (
+          <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
+            <Text style={styles.buttonText}>{team}</Text>
+          </Pressable>
+        ))
+      )}
 
       <Text style={styles.division}>Intermediate Division</Text>
-      {[
-        'Ashley/Julie',
-        'Stephanie/Misty',
-        'Eric/Sunil',
-        'Dan/Relu',
-        'Domencio/Keith',
-        'YG/Haaris',
-        'Nicole/Joshua',
-        'Amy/Nik',
-        'Elaine/Valerie',
-        'Marat/Marta',
-        'Beatriz/Joe',
-        'Alejandro/William',
-      ].map((team) => (
-        <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
-          <Text style={styles.buttonText}>{team}</Text>
-        </Pressable>
-      ))}
+      {intermediate.length === 0 ? (
+        <Text style={{ color: '#444', marginBottom: 10 }}>No teams found.</Text>
+      ) : (
+        intermediate.map((team) => (
+          <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
+            <Text style={styles.buttonText}>{team}</Text>
+          </Pressable>
+        ))
+      )}
 
       <Text style={styles.division}>Beginner Division</Text>
-      {[
-        'Eric/Tracy',
-        'Rachel/Jaime',
-        'Amy/Ellen',
-        'Lashonda/Lynette',
-        'Michael/JP',
-        'Fran/Scott',
-        'Robert/Adam',
-        'Cynthia/Maureen',
-        'Marina/Sharon',
-      ].map((team) => (
-        <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
-          <Text style={styles.buttonText}>{team}</Text>
-        </Pressable>
-      ))}
+      {beginner.length === 0 ? (
+        <Text style={{ color: '#444', marginBottom: 10 }}>No teams found.</Text>
+      ) : (
+        beginner.map((team) => (
+          <Pressable key={team} style={styles.button} onPress={() => beginChooseTeam(team)}>
+            <Text style={styles.buttonText}>{team}</Text>
+          </Pressable>
+        ))
+      )}
     </ScrollView>
   );
 }
