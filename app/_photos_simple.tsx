@@ -1,15 +1,17 @@
 // app/_photos_simple.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
   Image,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 
 import { supabase } from "@/constants/supabaseClient";
@@ -32,7 +34,14 @@ type UploadRow = {
 const SHARED_FOLDER = "shared";
 const BUCKET = "photos";
 
+// ✅ UI/perf tuning knobs
+const INITIAL_RENDER_COUNT = 60; // how many thumbnails to render initially
+const LOAD_MORE_STEP = 60; // how many more each time
+const LIST_LIMIT = 200; // how many to list from storage
+
 export default function PhotosSimple() {
+  const { width } = useWindowDimensions();
+
   const [status, setStatus] = useState<"signing_in" | "ready" | "error">(
     "signing_in"
   );
@@ -45,6 +54,9 @@ export default function PhotosSimple() {
   const [items, setItems] = useState<StorageItem[]>([]);
   const [ownersByPath, setOwnersByPath] = useState<Record<string, string>>({});
 
+  // ✅ Load-more state (only affects rendering)
+  const [visibleCount, setVisibleCount] = useState<number>(INITIAL_RENDER_COUNT);
+
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerIndex, setViewerIndex] = useState<number>(-1);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -55,6 +67,36 @@ export default function PhotosSimple() {
     initAuth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ✅ Grid sizing (aim for 8–10 across on desktop)
+  const grid = useMemo(() => {
+    const gutter = 10;
+
+    // Slightly bigger thumbnails than before
+    // Keep them not-too-big so 8–10 can fit on common widths.
+    const tileSize = Platform.OS === "web" ? 120 : 120;
+
+    // Available width inside padding
+    const available = Math.max(320, width - 24);
+
+    // Estimate columns by fitting tiles + gutters
+    const estimatedCols = Math.floor((available + gutter) / (tileSize + gutter));
+
+    // Clamp: desktop/web = up to 10 across, mobile = up to 4 across
+    const maxCols = Platform.OS === "web" ? 10 : 4;
+    const minCols = Platform.OS === "web" ? 4 : 2;
+
+    const numColumns = Math.max(minCols, Math.min(maxCols, estimatedCols || 1));
+
+    // Calculate exact tile size so it fills cleanly
+    const totalGutters = gutter * (numColumns - 1);
+    const computedTile = Math.floor((available - totalGutters) / numColumns);
+
+    // Cap tile size to avoid enormous tiles on ultra-wide screens
+    const finalTile = Math.min(150, Math.max(100, computedTile));
+
+    return { numColumns, tile: finalTile, gutter };
+  }, [width]);
 
   async function initAuth() {
     try {
@@ -112,7 +154,7 @@ export default function PhotosSimple() {
       setErr("");
 
       const { data, error } = await supabase.storage.from(BUCKET).list(folderPrefix, {
-        limit: 200,
+        limit: LIST_LIMIT,
         offset: 0,
         sortBy: { column: "name", order: "desc" },
       });
@@ -120,6 +162,9 @@ export default function PhotosSimple() {
 
       const list = ((data as any) || []) as StorageItem[];
       setItems(list);
+
+      // Reset visible thumbnails on refresh (keeps it fast)
+      setVisibleCount(INITIAL_RENDER_COUNT);
 
       const paths = list.map((it) => itemPath(it));
       if (paths.length === 0) {
@@ -149,7 +194,7 @@ export default function PhotosSimple() {
     }
   }
 
-  // ✅ UPDATED: Allow multiple file selection + upload all selected images
+  // ✅ MULTI-UPLOAD (WEB) still supported
   async function uploadOneWeb() {
     if (Platform.OS !== "web") return;
     if (!userId) return;
@@ -161,14 +206,18 @@ export default function PhotosSimple() {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*";
-      input.multiple = true; // ✅ allow selecting many at once
+      input.multiple = true;
 
       input.onchange = async () => {
         try {
           const files = Array.from(input.files ?? []);
           if (!files.length) return;
 
-          for (const file of files) {
+          // Safety: if someone selects a huge number, do it in chunks
+          const MAX_FILES_PER_RUN = 60;
+          const chosen = files.slice(0, MAX_FILES_PER_RUN);
+
+          for (const file of chosen) {
             const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
             const safeExt = ext.match(/^[a-z0-9]+$/) ? ext : "jpg";
 
@@ -244,6 +293,52 @@ export default function PhotosSimple() {
   const hasPrev = viewerIndex > 0;
   const hasNext = viewerIndex >= 0 && viewerIndex < items.length - 1;
 
+  // ✅ Arrow-key navigation on web while viewer is open
+  useEffect(() => {
+    if (!viewerOpen) return;
+    if (Platform.OS !== "web") return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!viewerOpen) return;
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        if (hasPrev) openViewerByIndex(viewerIndex - 1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        if (hasNext) openViewerByIndex(viewerIndex + 1);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closeViewer();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerOpen, viewerIndex, hasPrev, hasNext]);
+
+  // ✅ Swipe left/right navigation (mobile-friendly)
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_evt, gesture) => {
+        // Horizontal intent
+        return Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 12;
+      },
+      onPanResponderRelease: (_evt, gesture) => {
+        const SWIPE_THRESHOLD = 60;
+
+        if (gesture.dx > SWIPE_THRESHOLD) {
+          // swipe right -> previous
+          if (hasPrev) openViewerByIndex(viewerIndex - 1);
+        } else if (gesture.dx < -SWIPE_THRESHOLD) {
+          // swipe left -> next
+          if (hasNext) openViewerByIndex(viewerIndex + 1);
+        }
+      },
+    })
+  ).current;
+
   async function doDeleteNow() {
     if (!currentPath || !currentItem) return;
 
@@ -260,12 +355,10 @@ export default function PhotosSimple() {
         .eq("path", currentPath);
       if (rowDelErr) throw rowDelErr;
 
-      // After delete, refresh list and keep viewer open on a valid index
       const nextIndex = Math.min(viewerIndex, Math.max(0, items.length - 2));
       await refreshList();
       setConfirmingDelete(false);
 
-      // If list becomes empty, close
       if (items.length <= 1) {
         closeViewer();
       } else {
@@ -277,6 +370,17 @@ export default function PhotosSimple() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // ✅ Render only a limited number, then “Load more”
+  const visibleItems = useMemo(() => {
+    return items.slice(0, visibleCount);
+  }, [items, visibleCount]);
+
+  const canLoadMore = visibleCount < items.length;
+
+  function loadMore() {
+    setVisibleCount((c) => Math.min(items.length, c + LOAD_MORE_STEP));
   }
 
   if (status === "signing_in") {
@@ -320,24 +424,41 @@ export default function PhotosSimple() {
         </View>
 
         <Text style={styles.sub}>Folder: photos/{folderPrefix}/</Text>
-        <Text style={styles.sub}>Tap thumbnail to open, then use Prev/Next.</Text>
+        <Text style={styles.sub}>
+          Tip: In the viewer you can use <Text style={{ fontWeight: "800" }}>← →</Text> keys (desktop) or swipe (mobile).
+        </Text>
       </View>
 
       <FlatList
-        data={items}
+        data={visibleItems}
         keyExtractor={(it) => it.name}
-        contentContainerStyle={{ paddingBottom: 24 }}
+        numColumns={grid.numColumns}
+        columnWrapperStyle={grid.numColumns > 1 ? { gap: grid.gutter } : undefined}
+        contentContainerStyle={{ paddingBottom: 24, gap: grid.gutter }}
         renderItem={({ item, index }) => {
+          const actualIndex = index; // index within visibleItems matches first N of items
           const path = itemPath(item);
           const url = publicUrlForPath(path);
+
           return (
-            <Pressable style={styles.card} onPress={() => openViewerByIndex(index)}>
-              <Image source={{ uri: url }} style={styles.thumb} resizeMode="cover" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.itemText} numberOfLines={1}>
-                  {item.name}
-                </Text>
-              </View>
+            <Pressable
+              style={[
+                styles.tile,
+                {
+                  width: grid.tile,
+                  height: grid.tile + 28, // add space for filename
+                },
+              ]}
+              onPress={() => openViewerByIndex(actualIndex)}
+            >
+              <Image
+                source={{ uri: url }}
+                style={[styles.tileImage, { width: grid.tile, height: grid.tile }]}
+                resizeMode="cover"
+              />
+              <Text style={styles.tileText} numberOfLines={1}>
+                {item.name}
+              </Text>
             </Pressable>
           );
         }}
@@ -345,6 +466,20 @@ export default function PhotosSimple() {
           <View style={styles.empty}>
             <Text style={styles.sub}>No photos yet.</Text>
           </View>
+        }
+        ListFooterComponent={
+          canLoadMore ? (
+            <View style={{ paddingTop: 12 }}>
+              <Pressable style={[styles.btn, busy && styles.btnDisabled]} onPress={loadMore} disabled={busy}>
+                <Text style={styles.btnText}>Load More</Text>
+              </Pressable>
+              <Text style={styles.sub}>&nbsp;Showing {visibleItems.length} of {items.length}</Text>
+            </View>
+          ) : items.length > 0 ? (
+            <View style={{ paddingTop: 12 }}>
+              <Text style={styles.sub}>Showing all {items.length} photos.</Text>
+            </View>
+          ) : null
         }
       />
 
@@ -358,7 +493,7 @@ export default function PhotosSimple() {
 
               <View style={{ flexDirection: "row", gap: 8 }}>
                 <Pressable
-                  style={[styles.actionBtn, !hasPrev && styles.btnDisabled]}
+                  style={[styles.actionBtn, (!hasPrev || busy) && styles.btnDisabled]}
                   onPress={() => hasPrev && openViewerByIndex(viewerIndex - 1)}
                   disabled={!hasPrev || busy}
                 >
@@ -366,7 +501,7 @@ export default function PhotosSimple() {
                 </Pressable>
 
                 <Pressable
-                  style={[styles.actionBtn, !hasNext && styles.btnDisabled]}
+                  style={[styles.actionBtn, (!hasNext || busy) && styles.btnDisabled]}
                   onPress={() => hasNext && openViewerByIndex(viewerIndex + 1)}
                   disabled={!hasNext || busy}
                 >
@@ -375,7 +510,7 @@ export default function PhotosSimple() {
 
                 {canDeleteCurrent && !confirmingDelete && (
                   <Pressable
-                    style={[styles.actionBtn, styles.deleteBtn]}
+                    style={[styles.actionBtn, styles.deleteBtn, busy && styles.btnDisabled]}
                     onPress={() => setConfirmingDelete(true)}
                     disabled={busy}
                   >
@@ -383,14 +518,16 @@ export default function PhotosSimple() {
                   </Pressable>
                 )}
 
-                <Pressable style={styles.actionBtn} onPress={closeViewer} disabled={busy}>
+                <Pressable style={[styles.actionBtn, busy && styles.btnDisabled]} onPress={closeViewer} disabled={busy}>
                   <Text style={styles.actionText}>Close</Text>
                 </Pressable>
               </View>
             </View>
 
             {!!currentUrl && (
-              <Image source={{ uri: currentUrl }} style={styles.fullImage} resizeMode="contain" />
+              <View style={styles.viewerBody} {...panResponder.panHandlers}>
+                <Image source={{ uri: currentUrl }} style={styles.fullImage} resizeMode="contain" />
+              </View>
             )}
 
             {canDeleteCurrent && confirmingDelete && (
@@ -398,14 +535,14 @@ export default function PhotosSimple() {
                 <Text style={styles.confirmText}>Confirm delete?</Text>
                 <View style={{ flexDirection: "row", gap: 10 }}>
                   <Pressable
-                    style={[styles.actionBtn, styles.cancelBtn]}
+                    style={[styles.actionBtn, styles.cancelBtn, busy && styles.btnDisabled]}
                     onPress={() => setConfirmingDelete(false)}
                     disabled={busy}
                   >
                     <Text style={styles.actionText}>Cancel</Text>
                   </Pressable>
                   <Pressable
-                    style={[styles.actionBtn, styles.deleteBtn]}
+                    style={[styles.actionBtn, styles.deleteBtn, busy && styles.btnDisabled]}
                     onPress={doDeleteNow}
                     disabled={busy}
                   >
@@ -435,24 +572,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 10,
     backgroundColor: "#111",
+    alignSelf: "flex-start",
   },
   btnDisabled: { opacity: 0.4 },
   btnText: { color: "#fff", fontWeight: "600" },
 
-  card: {
-    flexDirection: "row",
-    gap: 12,
-    alignItems: "center",
-    padding: 10,
+  // ✅ Grid tile
+  tile: {
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "#ddd",
-    marginBottom: 10,
+    overflow: "hidden",
+    backgroundColor: "#fff",
   },
-  thumb: { width: 110, height: 110, borderRadius: 12, backgroundColor: "#eee" },
-  itemText: { fontSize: 14, fontWeight: "600" },
-  empty: { padding: 16, alignItems: "center" },
+  tileImage: {
+    backgroundColor: "#eee",
+  },
+  tileText: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    fontSize: 12,
+    fontWeight: "700",
+  },
 
+  empty: { padding: 16, alignItems: "center" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
 
   modalBackdrop: {
@@ -489,6 +632,7 @@ const styles = StyleSheet.create({
   deleteBtn: { backgroundColor: "#b00020" },
   cancelBtn: { backgroundColor: "#333" },
 
+  viewerBody: { width: "100%", backgroundColor: "#000" },
   fullImage: { width: "100%", height: 520, backgroundColor: "#000" },
 
   confirmBar: {
