@@ -149,6 +149,7 @@ export default function PhotosSimple() {
     }
   }
 
+  // ✅ UPDATED: Allow multiple file selection + upload all selected images
   async function uploadOneWeb() {
     if (Platform.OS !== "web") return;
     if (!userId) return;
@@ -160,29 +161,33 @@ export default function PhotosSimple() {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*";
+      input.multiple = true; // ✅ allow selecting many at once
+
       input.onchange = async () => {
         try {
-          const file = input.files?.[0];
-          if (!file) return;
+          const files = Array.from(input.files ?? []);
+          if (!files.length) return;
 
-          const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-          const safeExt = ext.match(/^[a-z0-9]+$/) ? ext : "jpg";
+          for (const file of files) {
+            const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+            const safeExt = ext.match(/^[a-z0-9]+$/) ? ext : "jpg";
 
-          const fileName = `${Date.now()}_${Math.random().toString(16).slice(2)}.${safeExt}`;
-          const path = `${folderPrefix}/${fileName}`;
+            const fileName = `${Date.now()}_${Math.random().toString(16).slice(2)}.${safeExt}`;
+            const path = `${folderPrefix}/${fileName}`;
 
-          const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
-            cacheControl: "3600",
-            upsert: false,
-            contentType: file.type || "image/jpeg",
-          });
-          if (error) throw error;
+            const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
+              cacheControl: "3600",
+              upsert: false,
+              contentType: file.type || "image/jpeg",
+            });
+            if (error) throw error;
 
-          const { error: insErr } = await supabase.from("photo_uploads").insert({
-            path,
-            uploader: userId,
-          });
-          if (insErr) throw insErr;
+            const { error: insErr } = await supabase.from("photo_uploads").insert({
+              path,
+              uploader: userId,
+            });
+            if (insErr) throw insErr;
+          }
 
           await refreshList();
         } catch (e: any) {
@@ -192,6 +197,7 @@ export default function PhotosSimple() {
           setBusy(false);
         }
       };
+
       input.click();
     } catch (e: any) {
       setErr(e?.message || String(e));
