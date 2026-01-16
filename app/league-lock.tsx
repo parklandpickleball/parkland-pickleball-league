@@ -41,11 +41,6 @@ export default function LeagueLockScreen() {
     await unlockAndEnter();
   };
 
-  // ✅ This is the "Demo Mode" Apple expects based on your review notes
-  const onEnterDemoMode = async () => {
-    await unlockAndEnter();
-  };
-
   return (
     <View style={{ flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'white' }}>
       <Text style={{ fontSize: 28, fontWeight: '900', marginBottom: 10 }}>
@@ -55,22 +50,6 @@ export default function LeagueLockScreen() {
       <Text style={{ color: '#333', marginBottom: 18, fontWeight: '600' }}>
         Enter the league access code to continue.
       </Text>
-
-      {/* ✅ DEMO MODE BUTTON (what Apple is looking for) */}
-      <Pressable
-        onPress={onEnterDemoMode}
-        style={{
-          backgroundColor: '#0A7AFF',
-          paddingVertical: 14,
-          borderRadius: 12,
-          alignItems: 'center',
-          marginBottom: 14,
-        }}
-      >
-        <Text style={{ color: 'white', fontWeight: '900', fontSize: 16 }}>
-          Enter Demo Mode
-        </Text>
-      </Pressable>
 
       <Text style={{ color: '#666', marginBottom: 10 }}>
         Or enter the league access code:
