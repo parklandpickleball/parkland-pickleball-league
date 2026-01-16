@@ -34,10 +34,9 @@ type UploadRow = {
 const SHARED_FOLDER = "shared";
 const BUCKET = "photos";
 
-// ✅ UI/perf tuning knobs
-const INITIAL_RENDER_COUNT = 60; // how many thumbnails to render initially
-const LOAD_MORE_STEP = 60; // how many more each time
-const LIST_LIMIT = 200; // how many to list from storage
+// ✅ 30 at a time
+const PAGE_SIZE = 30;
+const MAX_PAGES = 100; // safety cap
 
 export default function PhotosSimple() {
   const { width } = useWindowDimensions();
@@ -54,8 +53,9 @@ export default function PhotosSimple() {
   const [items, setItems] = useState<StorageItem[]>([]);
   const [ownersByPath, setOwnersByPath] = useState<Record<string, string>>({});
 
-  // ✅ Load-more state (only affects rendering)
-  const [visibleCount, setVisibleCount] = useState<number>(INITIAL_RENDER_COUNT);
+  // ✅ pagination
+  const [page, setPage] = useState<number>(0);
+  const [hasMore, setHasMore] = useState<boolean>(true);
 
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerIndex, setViewerIndex] = useState<number>(-1);
@@ -63,40 +63,30 @@ export default function PhotosSimple() {
 
   const folderPrefix = SHARED_FOLDER;
 
-  useEffect(() => {
-    initAuth();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ✅ Grid sizing (aim for 8–10 across on desktop)
+  // ✅ grid sizing: aim 8–10 across on desktop
   const grid = useMemo(() => {
     const gutter = 10;
-
-    // Slightly bigger thumbnails than before
-    // Keep them not-too-big so 8–10 can fit on common widths.
-    const tileSize = Platform.OS === "web" ? 120 : 120;
-
-    // Available width inside padding
     const available = Math.max(320, width - 24);
 
-    // Estimate columns by fitting tiles + gutters
-    const estimatedCols = Math.floor((available + gutter) / (tileSize + gutter));
+    const targetTile = Platform.OS === "web" ? 120 : 120;
+    const estimatedCols = Math.floor((available + gutter) / (targetTile + gutter));
 
-    // Clamp: desktop/web = up to 10 across, mobile = up to 4 across
     const maxCols = Platform.OS === "web" ? 10 : 4;
     const minCols = Platform.OS === "web" ? 4 : 2;
 
     const numColumns = Math.max(minCols, Math.min(maxCols, estimatedCols || 1));
 
-    // Calculate exact tile size so it fills cleanly
     const totalGutters = gutter * (numColumns - 1);
     const computedTile = Math.floor((available - totalGutters) / numColumns);
 
-    // Cap tile size to avoid enormous tiles on ultra-wide screens
     const finalTile = Math.min(150, Math.max(100, computedTile));
-
     return { numColumns, tile: finalTile, gutter };
   }, [width]);
+
+  useEffect(() => {
+    initAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function initAuth() {
     try {
@@ -148,53 +138,96 @@ export default function PhotosSimple() {
     return `${folderPrefix}/${item.name}`;
   }
 
+  async function fetchPage(p: number) {
+    const offset = p * PAGE_SIZE;
+
+    const { data, error } = await supabase.storage.from(BUCKET).list(folderPrefix, {
+      limit: PAGE_SIZE,
+      offset,
+      sortBy: { column: "name", order: "desc" },
+    });
+
+    if (error) throw error;
+    return (((data as any) || []) as StorageItem[]) ?? [];
+  }
+
+  async function updateOwnersFor(paths: string[]) {
+    if (paths.length === 0) return;
+
+    const { data: uploads, error: upErr } = await supabase
+      .from("photo_uploads")
+      .select("path,uploader,created_at")
+      .in("path", paths);
+
+    if (upErr) throw upErr;
+
+    setOwnersByPath((prev) => {
+      const next = { ...prev };
+      (uploads as UploadRow[] | null)?.forEach((r) => {
+        next[r.path] = r.uploader;
+      });
+      return next;
+    });
+  }
+
   async function refreshList() {
     try {
       setBusy(true);
       setErr("");
 
-      const { data, error } = await supabase.storage.from(BUCKET).list(folderPrefix, {
-        limit: LIST_LIMIT,
-        offset: 0,
-        sortBy: { column: "name", order: "desc" },
-      });
-      if (error) throw error;
+      setPage(0);
+      setHasMore(true);
+      setConfirmingDelete(false);
+      setViewerOpen(false);
+      setViewerIndex(-1);
 
-      const list = ((data as any) || []) as StorageItem[];
-      setItems(list);
+      const first = await fetchPage(0);
+      setItems(first);
 
-      // Reset visible thumbnails on refresh (keeps it fast)
-      setVisibleCount(INITIAL_RENDER_COUNT);
+      setOwnersByPath({});
+      await updateOwnersFor(first.map((it) => itemPath(it)));
 
-      const paths = list.map((it) => itemPath(it));
-      if (paths.length === 0) {
-        setOwnersByPath({});
-        return;
-      }
-
-      const { data: uploads, error: upErr } = await supabase
-        .from("photo_uploads")
-        .select("path,uploader,created_at")
-        .in("path", paths);
-
-      if (upErr) throw upErr;
-
-      const map: Record<string, string> = {};
-      (uploads as UploadRow[] | null)?.forEach((r) => {
-        map[r.path] = r.uploader;
-      });
-
-      setOwnersByPath(map);
+      if (first.length < PAGE_SIZE) setHasMore(false);
     } catch (e: any) {
-      const msg = e?.message || String(e);
-      setErr(msg);
+      setErr(e?.message || String(e));
       console.log("LIST ERROR:", e);
     } finally {
       setBusy(false);
     }
   }
 
-  // ✅ MULTI-UPLOAD (WEB) still supported
+  async function loadMore() {
+    if (busy) return;
+    if (!hasMore) return;
+    if (page >= MAX_PAGES) return;
+
+    try {
+      setBusy(true);
+      setErr("");
+
+      const nextPage = page + 1;
+      const next = await fetchPage(nextPage);
+
+      if (!next.length) {
+        setHasMore(false);
+        return;
+      }
+
+      setItems((prev) => [...prev, ...next]);
+      setPage(nextPage);
+
+      await updateOwnersFor(next.map((it) => itemPath(it)));
+
+      if (next.length < PAGE_SIZE) setHasMore(false);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+      console.log("LOAD MORE ERROR:", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ✅ WEB multi-upload still works
   async function uploadOneWeb() {
     if (Platform.OS !== "web") return;
     if (!userId) return;
@@ -213,7 +246,6 @@ export default function PhotosSimple() {
           const files = Array.from(input.files ?? []);
           if (!files.length) return;
 
-          // Safety: if someone selects a huge number, do it in chunks
           const MAX_FILES_PER_RUN = 60;
           const chosen = files.slice(0, MAX_FILES_PER_RUN);
 
@@ -238,6 +270,7 @@ export default function PhotosSimple() {
             if (insErr) throw insErr;
           }
 
+          // Reload only first page (fast)
           await refreshList();
         } catch (e: any) {
           setErr(e?.message || String(e));
@@ -293,7 +326,7 @@ export default function PhotosSimple() {
   const hasPrev = viewerIndex > 0;
   const hasNext = viewerIndex >= 0 && viewerIndex < items.length - 1;
 
-  // ✅ Arrow-key navigation on web while viewer is open
+  // ✅ Arrow keys in viewer (web)
   useEffect(() => {
     if (!viewerOpen) return;
     if (Platform.OS !== "web") return;
@@ -318,21 +351,17 @@ export default function PhotosSimple() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerOpen, viewerIndex, hasPrev, hasNext]);
 
-  // ✅ Swipe left/right navigation (mobile-friendly)
+  // ✅ Swipe in viewer (mobile + works on web trackpads too)
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_evt, gesture) => {
-        // Horizontal intent
         return Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 12;
       },
       onPanResponderRelease: (_evt, gesture) => {
         const SWIPE_THRESHOLD = 60;
-
         if (gesture.dx > SWIPE_THRESHOLD) {
-          // swipe right -> previous
           if (hasPrev) openViewerByIndex(viewerIndex - 1);
         } else if (gesture.dx < -SWIPE_THRESHOLD) {
-          // swipe left -> next
           if (hasNext) openViewerByIndex(viewerIndex + 1);
         }
       },
@@ -355,32 +384,32 @@ export default function PhotosSimple() {
         .eq("path", currentPath);
       if (rowDelErr) throw rowDelErr;
 
-      const nextIndex = Math.min(viewerIndex, Math.max(0, items.length - 2));
-      await refreshList();
+      // Update UI locally (fast)
+      const newItems = items.filter((it) => it.name !== currentItem.name);
+      setItems(newItems);
+
+      setOwnersByPath((prev) => {
+        const next = { ...prev };
+        delete next[currentPath];
+        return next;
+      });
+
       setConfirmingDelete(false);
 
-      if (items.length <= 1) {
+      if (newItems.length === 0) {
         closeViewer();
-      } else {
-        setViewerIndex(nextIndex);
+        setHasMore(false);
+        return;
       }
+
+      const nextIndex = Math.min(viewerIndex, newItems.length - 1);
+      setViewerIndex(nextIndex);
     } catch (e: any) {
       setErr(e?.message || String(e));
       console.log("DELETE ERROR:", e);
     } finally {
       setBusy(false);
     }
-  }
-
-  // ✅ Render only a limited number, then “Load more”
-  const visibleItems = useMemo(() => {
-    return items.slice(0, visibleCount);
-  }, [items, visibleCount]);
-
-  const canLoadMore = visibleCount < items.length;
-
-  function loadMore() {
-    setVisibleCount((c) => Math.min(items.length, c + LOAD_MORE_STEP));
   }
 
   if (status === "signing_in") {
@@ -425,18 +454,17 @@ export default function PhotosSimple() {
 
         <Text style={styles.sub}>Folder: photos/{folderPrefix}/</Text>
         <Text style={styles.sub}>
-          Tip: In the viewer you can use <Text style={{ fontWeight: "800" }}>← →</Text> keys (desktop) or swipe (mobile).
+          Viewer: use <Text style={{ fontWeight: "800" }}>← →</Text> (desktop) or swipe (mobile).
         </Text>
       </View>
 
       <FlatList
-        data={visibleItems}
+        data={items}
         keyExtractor={(it) => it.name}
         numColumns={grid.numColumns}
         columnWrapperStyle={grid.numColumns > 1 ? { gap: grid.gutter } : undefined}
         contentContainerStyle={{ paddingBottom: 24, gap: grid.gutter }}
         renderItem={({ item, index }) => {
-          const actualIndex = index; // index within visibleItems matches first N of items
           const path = itemPath(item);
           const url = publicUrlForPath(path);
 
@@ -444,12 +472,9 @@ export default function PhotosSimple() {
             <Pressable
               style={[
                 styles.tile,
-                {
-                  width: grid.tile,
-                  height: grid.tile + 28, // add space for filename
-                },
+                { width: grid.tile, height: grid.tile + 28 },
               ]}
-              onPress={() => openViewerByIndex(actualIndex)}
+              onPress={() => openViewerByIndex(index)}
             >
               <Image
                 source={{ uri: url }}
@@ -468,22 +493,28 @@ export default function PhotosSimple() {
           </View>
         }
         ListFooterComponent={
-          canLoadMore ? (
+          hasMore ? (
             <View style={{ paddingTop: 12 }}>
               <Pressable style={[styles.btn, busy && styles.btnDisabled]} onPress={loadMore} disabled={busy}>
                 <Text style={styles.btnText}>Load More</Text>
               </Pressable>
-              <Text style={styles.sub}>&nbsp;Showing {visibleItems.length} of {items.length}</Text>
+              <Text style={styles.sub}>&nbsp;Loaded {items.length} photo(s)</Text>
             </View>
           ) : items.length > 0 ? (
             <View style={{ paddingTop: 12 }}>
-              <Text style={styles.sub}>Showing all {items.length} photos.</Text>
+              <Text style={styles.sub}>No more photos to load.</Text>
             </View>
           ) : null
         }
       />
 
-      <Modal visible={viewerOpen} animationType="fade" transparent onRequestClose={closeViewer} presentationStyle="overFullScreen">
+      <Modal
+        visible={viewerOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={closeViewer}
+        presentationStyle="overFullScreen"
+      >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
@@ -577,7 +608,6 @@ const styles = StyleSheet.create({
   btnDisabled: { opacity: 0.4 },
   btnText: { color: "#fff", fontWeight: "600" },
 
-  // ✅ Grid tile
   tile: {
     borderRadius: 12,
     borderWidth: 1,
@@ -585,9 +615,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: "#fff",
   },
-  tileImage: {
-    backgroundColor: "#eee",
-  },
+  tileImage: { backgroundColor: "#eee" },
   tileText: {
     paddingHorizontal: 8,
     paddingVertical: 6,
