@@ -4,6 +4,7 @@ import * as Notifications from 'expo-notifications';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 const LEAGUE_UNLOCK_KEY = 'ppl_league_unlocked';
 const TEAM_KEY = 'ppl_selected_team';
@@ -101,5 +102,11 @@ export default function RootLayout() {
 
   if (!ready) return null;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <SafeAreaProvider>
+      <SafeAreaView style={{ flex: 1 }} edges={['top', 'left', 'right']}>
+        <Stack screenOptions={{ headerShown: false }} />
+      </SafeAreaView>
+    </SafeAreaProvider>
+  );
 }

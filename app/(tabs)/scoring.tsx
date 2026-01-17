@@ -2,7 +2,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Picker } from '@react-native-picker/picker';
 import { useFocusEffect } from 'expo-router';
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import {
+  Alert,
+  Platform,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 
 import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
 
@@ -31,7 +40,7 @@ type PersistedMatchScore = {
   teamB: ScoreFields;
   verified: boolean;
   verifiedBy: string | null;
-  verifiedAt: number | null; // ✅ local-only (NOT stored in Supabase right now)
+  verifiedAt: number | null; // local-only
 };
 
 const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
@@ -43,48 +52,19 @@ const TIMES: string[] = [
   '9:00 PM','9:15 PM','9:30 PM','9:45 PM',
 ];
 
-// ✅ Baseline teams (same baseline approach as Admin Teams)
 const DEFAULT_TEAMS_BY_DIVISION: Record<Division, string[]> = {
   Advanced: [
-    'Ishai/Greg',
-    'Adam/Jon',
-    'Bradley/Ben',
-    'Peter/Ray',
-    'Andrew/Brent',
-    'Mark D/Craig',
-    'Alex/Anibal',
-    'Radek/Alexi',
-    'Ricky/John',
-    'Brandon/Ikewa',
-    'Andrew/Dan',
-    'Eric/Meir',
-    'David/Guy',
-    'Mark P/Matt O',
+    'Ishai/Greg','Adam/Jon','Bradley/Ben','Peter/Ray','Andrew/Brent','Mark D/Craig',
+    'Alex/Anibal','Radek/Alexi','Ricky/John','Brandon/Ikewa','Andrew/Dan','Eric/Meir',
+    'David/Guy','Mark P/Matt O',
   ],
   Intermediate: [
-    'Ashley/Julie',
-    'Stephanie/Misty',
-    'Eric/Sunil',
-    'Dan/Relu',
-    'Domencio/Keith',
-    'YG/Haaris',
-    'Nicole/Joshua',
-    'Amy/Nik',
-    'Elaine/Valerie',
-    'Marat/Marta',
-    'Beatriz/Joe',
-    'Alejandro/William',
+    'Ashley/Julie','Stephanie/Misty','Eric/Sunil','Dan/Relu','Domencio/Keith','YG/Haaris',
+    'Nicole/Joshua','Amy/Nik','Elaine/Valerie','Marat/Marta','Beatriz/Joe','Alejandro/William',
   ],
   Beginner: [
-    'Eric/Tracy',
-    'Rachel/Jaime',
-    'Amy/Ellen',
-    'Lashonda/Lynette',
-    'Michael/JP',
-    'Fran/Scott',
-    'Robert/Adam',
-    'Cynthia/Maureen',
-    'Marina/Sharon',
+    'Eric/Tracy','Rachel/Jaime','Amy/Ellen','Lashonda/Lynette','Michael/JP','Fran/Scott',
+    'Robert/Adam','Cynthia/Maureen','Marina/Sharon',
   ],
 };
 
@@ -112,7 +92,6 @@ type SupabaseMatchScoreRow = {
   team_b: any;
   verified: boolean;
   verified_by: string | null;
-  // ✅ DO NOT include verified_at / verified_at_ms here because your table doesn't have it
 };
 
 function normalizeName(s: string) {
@@ -131,11 +110,7 @@ function isDivision(v: any): v is Division {
 async function fetchTeamsFromSupabase(): Promise<Record<Division, SupabaseTeamRow[]>> {
   const url = supabaseRestUrl('teams?select=id,created_at,division,name&order=created_at.asc');
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: supabaseHeaders(),
-  });
-
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
@@ -143,16 +118,10 @@ async function fetchTeamsFromSupabase(): Promise<Record<Division, SupabaseTeamRo
 
   const rows = (await res.json()) as SupabaseTeamRow[];
 
-  const grouped: Record<Division, SupabaseTeamRow[]> = {
-    Advanced: [],
-    Intermediate: [],
-    Beginner: [],
-  };
-
+  const grouped: Record<Division, SupabaseTeamRow[]> = { Advanced: [], Intermediate: [], Beginner: [] };
   for (const r of rows) {
     if (isDivision(r.division)) grouped[r.division].push(r);
   }
-
   return grouped;
 }
 
@@ -161,22 +130,17 @@ async function fetchMatchesFromSupabase(): Promise<SavedMatch[]> {
     'matches?select=id,week,division,time,court,team_a,team_b,created_at_ms&order=week.asc&order=division.asc&order=time.asc&order=court.asc'
   );
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: supabaseHeaders(),
-  });
-
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
   }
 
   const rows = (await res.json()) as SupabaseMatchRow[];
-
   const out: SavedMatch[] = [];
+
   for (const r of rows) {
     if (!isDivision(r.division)) continue;
-
     out.push({
       id: String(r.id),
       week: Number(r.week),
@@ -187,7 +151,6 @@ async function fetchMatchesFromSupabase(): Promise<SavedMatch[]> {
       teamB: String(r.team_b),
     });
   }
-
   return out;
 }
 
@@ -199,22 +162,17 @@ function asScoreFields(v: any): ScoreFields {
 }
 
 async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedMatchScore>> {
-  // ✅ FIX: remove verified_at/verified_at_ms from select because your table doesn't have it
   const url = supabaseRestUrl('match_scores?select=match_id,team_a,team_b,verified,verified_by');
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: supabaseHeaders(),
-  });
-
+  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Supabase SELECT failed: ${res.status} ${txt}`);
   }
 
   const rows = (await res.json()) as SupabaseMatchScoreRow[];
-
   const out: Record<string, PersistedMatchScore> = {};
+
   for (const r of rows) {
     const id = String(r.match_id);
     out[id] = {
@@ -223,7 +181,7 @@ async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedM
       teamB: asScoreFields(r.team_b),
       verified: !!r.verified,
       verifiedBy: r.verified_by ?? null,
-      verifiedAt: null, // ✅ no DB column for this right now
+      verifiedAt: null,
     };
   }
   return out;
@@ -232,7 +190,6 @@ async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedM
 async function upsertMatchScoreToSupabase(row: PersistedMatchScore) {
   const url = supabaseRestUrl('match_scores');
 
-  // ✅ FIX: remove verified_at/verified_at_ms from payload because your table doesn't have it
   const payload = {
     match_id: row.matchId,
     team_a: row.teamA,
@@ -299,14 +256,12 @@ const ScoreInput = memo(function ScoreInput({ initialValue, onChange, editable }
       inputMode="numeric"
       maxLength={2}
       blurOnSubmit={false}
-      enterKeyHint="done"
       style={{
-        flex: 1,
+        width: '100%',
         borderWidth: 1,
         borderColor: editable ? '#ccc' : '#e0e0e0',
         paddingVertical: Platform.OS === 'web' ? 8 : 6,
         textAlign: 'center',
-        marginHorizontal: 4,
         borderRadius: 6,
         backgroundColor: editable ? 'white' : '#f2f2f2',
         color: 'black',
@@ -325,18 +280,10 @@ function totalOf(fields: ScoreFields) {
   return toN(fields.g1) + toN(fields.g2) + toN(fields.g3);
 }
 
-/**
- * ✅ IMPORTANT: a score is considered "entered" if the string is NOT empty.
- * This allows legitimate scores like "0" to count as entered.
- */
 function isEnteredScore(v: string) {
   return (v ?? '').trim() !== '';
 }
 
-/**
- * ✅ IMPORTANT: a game is considered entered ONLY when BOTH teams have a score.
- * This prevents "blank treated as 0" from accidentally counting as entered.
- */
 function gameEnteredPair(a: string, b: string) {
   return isEnteredScore(a) && isEnteredScore(b);
 }
@@ -392,9 +339,6 @@ function statusLine(teamAName: string, teamBName: string, teamA: ScoreFields, te
   return parts.join(' • ');
 }
 
-/**
- * ✅ COMPLETION must be based ONLY on PERSISTED (saved) values.
- */
 function persistedCompletionLabel(p?: PersistedMatchScore) {
   if (!p) return null as null | 'PARTIAL' | 'COMPLETED';
 
@@ -415,14 +359,15 @@ function safeInt(value: string, fallback: number) {
 }
 
 export default function ScoringScreen() {
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
+
   const [matches, setMatches] = useState<SavedMatch[]>([]);
   const [myTeam, setMyTeam] = useState<string | null>(null);
   const [myPlayerName, setMyPlayerName] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
-  // Draft edits (local only)
   const [scores, setScores] = useState<Record<string, ScoreFields>>({});
-  // ✅ Persisted scores now come from Supabase
   const [persisted, setPersisted] = useState<Record<string, PersistedMatchScore>>({});
 
   const [selectedWeek, setSelectedWeek] = useState<number>(1);
@@ -557,14 +502,7 @@ export default function ScoringScreen() {
 
     setScores((prev) => {
       const existing = prev[key] ?? getFields(matchId, teamName, persistedFieldsForTeam);
-
-      const next: ScoreFields = {
-        g1: existing.g1,
-        g2: existing.g2,
-        g3: existing.g3,
-        [field]: value,
-      };
-
+      const next: ScoreFields = { ...existing, [field]: value };
       return { ...prev, [key]: next };
     });
   };
@@ -613,12 +551,10 @@ export default function ScoringScreen() {
         teamB: teamBFields,
         verified: true,
         verifiedBy: by,
-        verifiedAt: Date.now(), // ✅ local-only for UI
+        verifiedAt: Date.now(),
       };
 
       await upsertMatchScoreToSupabase(row);
-
-      // ✅ Refresh persisted from Supabase after saving
       await refreshPersistedScores();
     };
 
@@ -702,8 +638,20 @@ export default function ScoringScreen() {
     return !knownTeamsSet.has(normalizeName(myTeam));
   }, [myTeam, knownTeamsSet]);
 
+  // Column sizing: bigger in landscape
+  const colTime = 110;
+  const colCourt = 90;
+  const colTeam = isLandscape ? 320 : 220; // ✅ shows team names in portrait and landscape
+  const colGame = 90;
+  const colTotal = 90;
+
+  const tableMinWidth = colTime + colCourt + colTeam + (colGame * 3) + colTotal;
+
   return (
-    <ScrollView contentContainerStyle={{ padding: 16 }}>
+    <ScrollView
+      contentContainerStyle={{ padding: 16 }}
+      keyboardShouldPersistTaps="handled"
+    >
       <Text style={{ fontSize: 24, fontWeight: '900', marginBottom: 6 }}>Scoring</Text>
 
       <Text style={{ color: '#444', marginBottom: 12 }}>
@@ -835,55 +783,73 @@ export default function ScoringScreen() {
                             (Read-only — you can view scores but cannot edit this match)
                           </Text>
                         ) : null}
+
+                        <Text style={{ marginTop: 6, color: '#666' }}>
+                          Tip: swipe left/right on the table to see all columns (Team + G1/G2/G3).
+                        </Text>
                       </View>
 
-                      <View style={{ flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#000', paddingVertical: 8, backgroundColor: '#f5f5f5' }}>
-                        <Text style={{ width: 110, fontWeight: '900', textAlign: 'center' }}>TIME</Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>COURT #</Text>
-                        <Text style={{ flex: 2, fontWeight: '900', textAlign: 'center' }}>TEAM NAME</Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>G1</Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>G2</Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>G3</Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>TOTAL</Text>
-                      </View>
+                      {/* ✅ Horizontal scroll wrapper so you can reach TEAM + G3 */}
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator
+                        contentContainerStyle={{ minWidth: tableMinWidth }}
+                        keyboardShouldPersistTaps="handled"
+                      >
+                        <View style={{ width: tableMinWidth }}>
+                          <View style={{ flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#000', paddingVertical: 8, backgroundColor: '#f5f5f5' }}>
+                            <Text style={{ width: colTime, fontWeight: '900', textAlign: 'center' }}>TIME</Text>
+                            <Text style={{ width: colCourt, fontWeight: '900', textAlign: 'center' }}>COURT #</Text>
+                            <Text style={{ width: colTeam, fontWeight: '900', textAlign: 'center' }}>TEAM NAME</Text>
+                            <Text style={{ width: colGame, fontWeight: '900', textAlign: 'center' }}>G1</Text>
+                            <Text style={{ width: colGame, fontWeight: '900', textAlign: 'center' }}>G2</Text>
+                            <Text style={{ width: colGame, fontWeight: '900', textAlign: 'center' }}>G3</Text>
+                            <Text style={{ width: colTotal, fontWeight: '900', textAlign: 'center' }}>TOTAL</Text>
+                          </View>
 
-                      <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
-                        <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
-                        <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamA}</Text>
+                          <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
+                            <Text style={{ width: colTime, textAlign: 'center' }}>{m.time}</Text>
+                            <Text style={{ width: colCourt, textAlign: 'center' }}>{m.court}</Text>
+                            <Text style={{ width: colTeam, textAlign: 'center' }} numberOfLines={2}>
+                              {m.teamA}
+                            </Text>
 
-                        <View style={{ width: 90 }}>
-                          <ScoreInput initialValue={aFields.g1} editable={editable} onChange={(v) => setScore(m.id, m.teamA, 'g1', v)} />
+                            <View style={{ width: colGame, paddingHorizontal: 6 }}>
+                              <ScoreInput initialValue={aFields.g1} editable={editable} onChange={(v) => setScore(m.id, m.teamA, 'g1', v)} />
+                            </View>
+                            <View style={{ width: colGame, paddingHorizontal: 6 }}>
+                              <ScoreInput initialValue={aFields.g2} editable={editable} onChange={(v) => setScore(m.id, m.teamA, 'g2', v)} />
+                            </View>
+                            <View style={{ width: colGame, paddingHorizontal: 6 }}>
+                              <ScoreInput initialValue={aFields.g3} editable={editable} onChange={(v) => setScore(m.id, m.teamA, 'g3', v)} />
+                            </View>
+
+                            <Text style={{ width: colTotal, textAlign: 'center', fontWeight: '900' }}>{aTotal}</Text>
+                          </View>
+
+                          <View style={{ height: 1, backgroundColor: '#000' }} />
+
+                          <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
+                            <Text style={{ width: colTime, textAlign: 'center' }}>{m.time}</Text>
+                            <Text style={{ width: colCourt, textAlign: 'center' }}>{m.court}</Text>
+                            <Text style={{ width: colTeam, textAlign: 'center' }} numberOfLines={2}>
+                              {m.teamB}
+                            </Text>
+
+                            <View style={{ width: colGame, paddingHorizontal: 6 }}>
+                              <ScoreInput initialValue={bFields.g1} editable={editable} onChange={(v) => setScore(m.id, m.teamB, 'g1', v)} />
+                            </View>
+                            <View style={{ width: colGame, paddingHorizontal: 6 }}>
+                              <ScoreInput initialValue={bFields.g2} editable={editable} onChange={(v) => setScore(m.id, m.teamB, 'g2', v)} />
+                            </View>
+                            <View style={{ width: colGame, paddingHorizontal: 6 }}>
+                              <ScoreInput initialValue={bFields.g3} editable={editable} onChange={(v) => setScore(m.id, m.teamB, 'g3', v)} />
+                            </View>
+
+                            <Text style={{ width: colTotal, textAlign: 'center', fontWeight: '900' }}>{bTotal}</Text>
+                          </View>
                         </View>
-                        <View style={{ width: 90 }}>
-                          <ScoreInput initialValue={aFields.g2} editable={editable} onChange={(v) => setScore(m.id, m.teamA, 'g2', v)} />
-                        </View>
-                        <View style={{ width: 90 }}>
-                          <ScoreInput initialValue={aFields.g3} editable={editable} onChange={(v) => setScore(m.id, m.teamA, 'g3', v)} />
-                        </View>
-
-                        <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>{aTotal}</Text>
-                      </View>
-
-                      <View style={{ height: 1, backgroundColor: '#000' }} />
-
-                      <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
-                        <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
-                        <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamB}</Text>
-
-                        <View style={{ width: 90 }}>
-                          <ScoreInput initialValue={bFields.g1} editable={editable} onChange={(v) => setScore(m.id, m.teamB, 'g1', v)} />
-                        </View>
-                        <View style={{ width: 90 }}>
-                          <ScoreInput initialValue={bFields.g2} editable={editable} onChange={(v) => setScore(m.id, m.teamB, 'g2', v)} />
-                        </View>
-                        <View style={{ width: 90 }}>
-                          <ScoreInput initialValue={bFields.g3} editable={editable} onChange={(v) => setScore(m.id, m.teamB, 'g3', v)} />
-                        </View>
-
-                        <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>{bTotal}</Text>
-                      </View>
+                      </ScrollView>
 
                       <View style={{ borderTopWidth: 1, borderTopColor: '#000', padding: 10, backgroundColor: '#fafafa' }}>
                         <Pressable

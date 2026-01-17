@@ -425,69 +425,78 @@ export default function ResultsScreen() {
                         </Text>
                       </View>
 
-                      <View
-                        style={{
-                          flexDirection: 'row',
-                          borderBottomWidth: 1,
-                          borderBottomColor: '#000',
-                          paddingVertical: 8,
-                          backgroundColor: '#f5f5f5',
-                        }}
+                      {/* ✅ Horizontal scroll wrapper for the wide table (HEADER + ROWS) */}
+                      <ScrollView
+                        horizontal
+                        nestedScrollEnabled
+                        showsHorizontalScrollIndicator
                       >
-                        <Text style={{ width: 110, fontWeight: '900', textAlign: 'center' }}>
-                          TIME
-                        </Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
-                          COURT #
-                        </Text>
-                        <Text style={{ flex: 2, fontWeight: '900', textAlign: 'center' }}>
-                          TEAM NAME
-                        </Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
-                          G1
-                        </Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
-                          G2
-                        </Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
-                          G3
-                        </Text>
-                        <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
-                          TOTAL
-                        </Text>
-                      </View>
+                        <View style={{ minWidth: 700 }}>
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              borderBottomWidth: 1,
+                              borderBottomColor: '#000',
+                              paddingVertical: 8,
+                              backgroundColor: '#f5f5f5',
+                            }}
+                          >
+                            <Text style={{ width: 110, fontWeight: '900', textAlign: 'center' }}>
+                              TIME
+                            </Text>
+                            <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                              COURT #
+                            </Text>
+                            <Text style={{ flex: 2, fontWeight: '900', textAlign: 'center' }}>
+                              TEAM NAME
+                            </Text>
+                            <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                              G1
+                            </Text>
+                            <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                              G2
+                            </Text>
+                            <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                              G3
+                            </Text>
+                            <Text style={{ width: 90, fontWeight: '900', textAlign: 'center' }}>
+                              TOTAL
+                            </Text>
+                          </View>
 
-                      {/* TEAM A */}
-                      <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
-                        <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
-                        <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamA}</Text>
+                          {/* TEAM A */}
+                          <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
+                            <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
+                            <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamA}</Text>
 
-                        <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g1 || '-'}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g2 || '-'}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g3 || '-'}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g1 || '-'}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g2 || '-'}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{aFields.g3 || '-'}</Text>
 
-                        <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>
-                          {aTotal}
-                        </Text>
-                      </View>
+                            <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>
+                              {aTotal}
+                            </Text>
+                          </View>
 
-                      <View style={{ height: 1, backgroundColor: '#000' }} />
+                          <View style={{ height: 1, backgroundColor: '#000' }} />
 
-                      {/* TEAM B */}
-                      <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
-                        <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
-                        <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamB}</Text>
+                          {/* TEAM B */}
+                          <View style={{ flexDirection: 'row', paddingVertical: 10, alignItems: 'center' }}>
+                            <Text style={{ width: 110, textAlign: 'center' }}>{m.time}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{m.court}</Text>
+                            <Text style={{ flex: 2, textAlign: 'center' }}>{m.teamB}</Text>
 
-                        <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g1 || '-'}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g2 || '-'}</Text>
-                        <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g3 || '-'}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g1 || '-'}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g2 || '-'}</Text>
+                            <Text style={{ width: 90, textAlign: 'center' }}>{bFields.g3 || '-'}</Text>
 
-                        <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>
-                          {bTotal}
-                        </Text>
-                      </View>
+                            <Text style={{ width: 90, textAlign: 'center', fontWeight: '900' }}>
+                              {bTotal}
+                            </Text>
+                          </View>
+                        </View>
+                      </ScrollView>
                     </View>
                   );
                 })}

@@ -1,6 +1,6 @@
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { ScrollView, Text, View, useWindowDimensions } from 'react-native';
 
 import { supabaseHeaders, supabaseRestUrl } from '@/constants/supabase';
 
@@ -145,7 +145,6 @@ function normalizeName(s: string) {
     .replace(/\s+/g, ' ') // collapse any weird whitespace
     .trim();
 }
-
 
 function uniqSorted(list: string[]) {
   const set = new Set(list.map((x) => normalizeName(x)).filter(Boolean));
@@ -399,6 +398,8 @@ function addTotals(
 }
 
 export default function StandingsScreen() {
+  const { width } = useWindowDimensions();
+
   const [matches, setMatches] = useState<SavedMatch[]>([]);
   const [scores, setScores] = useState<Record<string, PersistedMatchScore>>({});
 
@@ -462,47 +463,40 @@ export default function StandingsScreen() {
     }
 
     // 2) Division moves from Supabase (shared)
-try {
-  const url = supabaseRestUrl(
-    'division_moves?select=id,team,from_division,to_division,effective_week,created_at&order=effective_week.asc&order=created_at.asc'
-  );
+    try {
+      const url = supabaseRestUrl(
+        'division_moves?select=id,team,from_division,to_division,effective_week,created_at&order=effective_week.asc&order=created_at.asc'
+      );
 
-  const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`Supabase division_moves SELECT failed: ${res.status} ${txt}`);
-  }
+      const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Supabase division_moves SELECT failed: ${res.status} ${txt}`);
+      }
 
-  const rows = (await res.json()) as any[];
+      const rows = (await res.json()) as any[];
 
-  const parsed: DivisionMove[] = rows
-  .map((r) => {
-    const team = normalizeName(String(r.team ?? ''));
-    const fromDivision = String(r.from_division ?? '').trim();
-    const toDivision = String(r.to_division ?? '').trim();
+      const parsed: DivisionMove[] = rows
+        .map((r) => {
+          const team = normalizeName(String(r.team ?? ''));
+          const fromDivision = String(r.from_division ?? '').trim();
+          const toDivision = String(r.to_division ?? '').trim();
 
-    return {
-      id: String(r.id),
-      team,
-      fromDivision: fromDivision as Division,
-      toDivision: toDivision as Division,
-      effectiveWeek: Number(r.effective_week ?? 1) || 1,
-      createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
-    };
-  })
+          return {
+            id: String(r.id),
+            team,
+            fromDivision: fromDivision as Division,
+            toDivision: toDivision as Division,
+            effectiveWeek: Number(r.effective_week ?? 1) || 1,
+            createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+          };
+        })
+        .filter((mv) => mv.team && isDivision(mv.fromDivision) && isDivision(mv.toDivision));
 
-    .filter(
-      (mv) =>
-        mv.team &&
-        isDivision(mv.fromDivision) &&
-        isDivision(mv.toDivision)
-    );
-
-  setDivisionMoves(parsed);
-} catch {
-  setDivisionMoves([]);
-}
-
+      setDivisionMoves(parsed);
+    } catch {
+      setDivisionMoves([]);
+    }
   }, []);
 
   useEffect(() => {
@@ -714,6 +708,7 @@ try {
   }, [matches, scores, baseRows, divisionMoves, dbTeams, supabaseDivisionByTeam, baselineHasStats]);
 
   console.log('DIVISION MOVES FROM SUPABASE:', divisionMoves);
+
   const standingsInfoText = useMemo(() => {
     if (baselineHasStats) {
       return `Standings are based on: Week 1 baseline + verified scores from Week ${START_WEEK_FOR_AUTOCALC}+ (synced via Supabase).`;
@@ -758,72 +753,85 @@ try {
           {computed.map((section) => {
             if (section.rows.length === 0) return null;
 
+            // ✅ This is the key: table must have a min width so it can scroll in portrait,
+            // and will expand naturally in landscape.
+            const tableMinWidth = Math.max(width, 720);
+
             return (
               <View key={section.division}>
                 <Text style={{ fontSize: 20, fontWeight: '900', marginBottom: 8 }}>
                   {section.division}
                 </Text>
 
-                {/* Header row */}
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    borderWidth: 2,
-                    borderColor: '#000',
-                    backgroundColor: '#f2f2f2',
-                  }}
-                >
-                  <Text style={{ width: 50, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    #
-                  </Text>
-                  <Text style={{ flex: 2.2, padding: 10, fontWeight: '900' }}>Team</Text>
-                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    GP
-                  </Text>
-                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    W
-                  </Text>
-                  <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    L
-                  </Text>
-                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    PF
-                  </Text>
-                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    PA
-                  </Text>
-                  <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
-                    DIFF
-                  </Text>
-                </View>
-
-                {/* Rows */}
-                <View style={{ borderWidth: 2, borderColor: '#000', borderTopWidth: 0 }}>
-                  {section.rows.map((r, idx) => (
+                {/* ✅ HORIZONTAL SCROLL WRAPPER (FIX) */}
+                <ScrollView horizontal showsHorizontalScrollIndicator>
+                  <View style={{ minWidth: tableMinWidth }}>
+                    {/* Header row */}
                     <View
-                      key={`${r.team}_${idx}`}
                       style={{
                         flexDirection: 'row',
-                        borderTopWidth: idx === 0 ? 0 : 1,
-                        borderTopColor: '#000',
-                        backgroundColor: 'white',
+                        borderWidth: 2,
+                        borderColor: '#000',
+                        backgroundColor: '#f2f2f2',
                       }}
                     >
-                      <Text style={{ width: 50, padding: 10, textAlign: 'center', fontWeight: '900' }}>
-                        {idx + 1}
+                      <Text style={{ width: 50, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        #
                       </Text>
-                      <Text style={{ flex: 2.2, padding: 10, fontWeight: '700' }}>{r.team}</Text>
-                      <Text style={{ width: 55, padding: 10, textAlign: 'center' }}>{r.gamesPlayed}</Text>
-                      <Text style={{ width: 55, padding: 10, textAlign: 'center', fontWeight: '900' }}>{r.wins}</Text>
-                      <Text style={{ width: 55, padding: 10, textAlign: 'center', fontWeight: '900' }}>{r.losses}</Text>
-                      <Text style={{ width: 70, padding: 10, textAlign: 'center' }}>{r.pointsFor}</Text>
-                      <Text style={{ width: 70, padding: 10, textAlign: 'center' }}>{r.pointsAgainst}</Text>
-                      <Text style={{ width: 70, padding: 10, textAlign: 'center', fontWeight: '900' }}>
-                        {pointDiff(r)}
+                      <Text style={{ flex: 2.2, padding: 10, fontWeight: '900' }}>Team</Text>
+                      <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        GP
+                      </Text>
+                      <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        W
+                      </Text>
+                      <Text style={{ width: 55, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        L
+                      </Text>
+                      <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        PF
+                      </Text>
+                      <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        PA
+                      </Text>
+                      <Text style={{ width: 70, padding: 10, fontWeight: '900', textAlign: 'center' }}>
+                        DIFF
                       </Text>
                     </View>
-                  ))}
-                </View>
+
+                    {/* Rows */}
+                    <View style={{ borderWidth: 2, borderColor: '#000', borderTopWidth: 0 }}>
+                      {section.rows.map((r, idx) => (
+                        <View
+                          key={`${r.team}_${idx}`}
+                          style={{
+                            flexDirection: 'row',
+                            borderTopWidth: idx === 0 ? 0 : 1,
+                            borderTopColor: '#000',
+                            backgroundColor: 'white',
+                          }}
+                        >
+                          <Text style={{ width: 50, padding: 10, textAlign: 'center', fontWeight: '900' }}>
+                            {idx + 1}
+                          </Text>
+                          <Text style={{ flex: 2.2, padding: 10, fontWeight: '700' }}>{r.team}</Text>
+                          <Text style={{ width: 55, padding: 10, textAlign: 'center' }}>{r.gamesPlayed}</Text>
+                          <Text style={{ width: 55, padding: 10, textAlign: 'center', fontWeight: '900' }}>
+                            {r.wins}
+                          </Text>
+                          <Text style={{ width: 55, padding: 10, textAlign: 'center', fontWeight: '900' }}>
+                            {r.losses}
+                          </Text>
+                          <Text style={{ width: 70, padding: 10, textAlign: 'center' }}>{r.pointsFor}</Text>
+                          <Text style={{ width: 70, padding: 10, textAlign: 'center' }}>{r.pointsAgainst}</Text>
+                          <Text style={{ width: 70, padding: 10, textAlign: 'center', fontWeight: '900' }}>
+                            {pointDiff(r)}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </ScrollView>
               </View>
             );
           })}

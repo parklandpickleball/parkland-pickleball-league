@@ -8,13 +8,19 @@ import {
   PanResponder,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
-  View,
   useWindowDimensions,
+  View,
 } from "react-native";
 
 import { supabase } from "@/constants/supabaseClient";
+import * as FileSystem from "expo-file-system/legacy";
+import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
+import * as ImagePicker from "expo-image-picker";
+
+
 
 type StorageItem = {
   name: string;
@@ -38,12 +44,31 @@ const BUCKET = "photos";
 const PAGE_SIZE = 30;
 const MAX_PAGES = 100; // safety cap
 
-export default function PhotosSimple() {
-  const { width } = useWindowDimensions();
+function base64ToUint8Array(base64: string) {
+  // RN/Expo has global atob in many environments, but not always.
+  // This works reliably via Buffer-like conversion fallback.
+  // We'll implement a pure JS decoder.
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let str = base64.replace(/=+$/, "");
+  let output: number[] = [];
 
-  const [status, setStatus] = useState<"signing_in" | "ready" | "error">(
-    "signing_in"
-  );
+  for (let bc = 0, bs = 0, buffer: any, idx = 0; (buffer = str.charAt(idx++)); ) {
+    const charIndex = chars.indexOf(buffer);
+    if (charIndex === -1) continue;
+
+    bs = bc % 4 ? bs * 64 + charIndex : charIndex;
+    if (bc++ % 4) {
+      output.push(255 & (bs >> ((-2 * bc) & 6)));
+    }
+  }
+
+  return new Uint8Array(output);
+}
+
+export default function PhotosSimple() {
+  const { width, height } = useWindowDimensions();
+
+  const [status, setStatus] = useState<"signing_in" | "ready" | "error">("signing_in");
   const [err, setErr] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
 
@@ -60,6 +85,9 @@ export default function PhotosSimple() {
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerIndex, setViewerIndex] = useState<number>(-1);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  // ✅ zoom (cross-platform)
+  const [zoom, setZoom] = useState<number>(1);
 
   const folderPrefix = SHARED_FOLDER;
 
@@ -180,6 +208,7 @@ export default function PhotosSimple() {
       setConfirmingDelete(false);
       setViewerOpen(false);
       setViewerIndex(-1);
+      setZoom(1);
 
       const first = await fetchPage(0);
       setItems(first);
@@ -259,7 +288,7 @@ export default function PhotosSimple() {
             const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
               cacheControl: "3600",
               upsert: false,
-              contentType: file.type || "image/jpeg",
+              contentType: (file as any).type || "image/jpeg",
             });
             if (error) throw error;
 
@@ -288,16 +317,87 @@ export default function PhotosSimple() {
     }
   }
 
+  // ✅ PHONE upload (iOS/Android)
+  async function uploadFromPhone() {
+    if (Platform.OS === "web") return;
+    if (!userId) return;
+
+    try {
+      setBusy(true);
+      setErr("");
+
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setErr("Photo library permission denied.");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsMultipleSelection: true,
+        selectionLimit: 30,
+        quality: 0.9,
+      });
+
+      if (result.canceled) return;
+
+      const assets = result.assets || [];
+      if (!assets.length) return;
+
+      for (const asset of assets) {
+        const uri = asset.uri;
+        const converted = await manipulateAsync(
+  uri,
+  [],
+  { compress: 0.9, format: SaveFormat.JPEG }
+);
+const jpegUri = converted.uri;
+
+        
+
+        // Read file bytes reliably
+const base64 = await FileSystem.readAsStringAsync(jpegUri, { encoding: "base64" as any });
+        const bytes = base64ToUint8Array(base64);
+
+        // Always store as jpg for max compatibility
+        const fileName = `${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`;
+        const path = `${folderPrefix}/${fileName}`;
+
+        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, bytes, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: "image/jpeg",
+        });
+        if (upErr) throw upErr;
+
+        const { error: insErr } = await supabase.from("photo_uploads").insert({
+          path,
+          uploader: userId,
+        });
+        if (insErr) throw insErr;
+      }
+
+      await refreshList();
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+      console.log("PHONE UPLOAD ERROR:", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openViewerByIndex(index: number) {
     setViewerIndex(index);
     setViewerOpen(true);
     setConfirmingDelete(false);
+    setZoom(1); // ✅ reset zoom on open
   }
 
   function closeViewer() {
     setViewerOpen(false);
     setViewerIndex(-1);
     setConfirmingDelete(false);
+    setZoom(1);
   }
 
   const currentItem = useMemo(() => {
@@ -326,6 +426,12 @@ export default function PhotosSimple() {
   const hasPrev = viewerIndex > 0;
   const hasNext = viewerIndex >= 0 && viewerIndex < items.length - 1;
 
+  // ✅ Reset zoom when changing photos
+  useEffect(() => {
+    if (!viewerOpen) return;
+    setZoom(1);
+  }, [viewerIndex, viewerOpen]);
+
   // ✅ Arrow keys in viewer (web)
   useEffect(() => {
     if (!viewerOpen) return;
@@ -351,13 +457,21 @@ export default function PhotosSimple() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerOpen, viewerIndex, hasPrev, hasNext]);
 
-  // ✅ Swipe in viewer (mobile + works on web trackpads too)
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_evt, gesture) => {
+        if (!viewerOpen) return false;
+        if (zoom !== 1) return false;
+        return Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 12;
+      },
+      onMoveShouldSetPanResponderCapture: (_evt, gesture) => {
+        if (!viewerOpen) return false;
+        if (zoom !== 1) return false;
         return Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 12;
       },
       onPanResponderRelease: (_evt, gesture) => {
+        if (zoom !== 1) return;
+
         const SWIPE_THRESHOLD = 60;
         if (gesture.dx > SWIPE_THRESHOLD) {
           if (hasPrev) openViewerByIndex(viewerIndex - 1);
@@ -378,13 +492,9 @@ export default function PhotosSimple() {
       const { error: delErr } = await supabase.storage.from(BUCKET).remove([currentPath]);
       if (delErr) throw delErr;
 
-      const { error: rowDelErr } = await supabase
-        .from("photo_uploads")
-        .delete()
-        .eq("path", currentPath);
+      const { error: rowDelErr } = await supabase.from("photo_uploads").delete().eq("path", currentPath);
       if (rowDelErr) throw rowDelErr;
 
-      // Update UI locally (fast)
       const newItems = items.filter((it) => it.name !== currentItem.name);
       setItems(newItems);
 
@@ -411,6 +521,21 @@ export default function PhotosSimple() {
       setBusy(false);
     }
   }
+
+  function zoomIn() {
+    setZoom((z) => Math.min(4, Number((z + 0.5).toFixed(2))));
+  }
+  function zoomOut() {
+    setZoom((z) => Math.max(1, Number((z - 0.5).toFixed(2))));
+  }
+  function resetZoom() {
+    setZoom(1);
+  }
+
+  const viewerHeight = useMemo(() => {
+    const usable = Math.max(260, height - 220);
+    return usable;
+  }, [height]);
 
   if (status === "signing_in") {
     return (
@@ -445,6 +570,12 @@ export default function PhotosSimple() {
             <Text style={styles.btnText}>Refresh List</Text>
           </Pressable>
 
+          {Platform.OS !== "web" && (
+            <Pressable style={[styles.btn, busy && styles.btnDisabled]} onPress={uploadFromPhone} disabled={busy}>
+              <Text style={styles.btnText}>Upload (Phone)</Text>
+            </Pressable>
+          )}
+
           {Platform.OS === "web" && (
             <Pressable style={[styles.btn, busy && styles.btnDisabled]} onPress={uploadOneWeb} disabled={busy}>
               <Text style={styles.btnText}>Upload (Web)</Text>
@@ -459,6 +590,7 @@ export default function PhotosSimple() {
       </View>
 
       <FlatList
+        key={`cols-${grid.numColumns}`}
         data={items}
         keyExtractor={(it) => it.name}
         numColumns={grid.numColumns}
@@ -469,18 +601,8 @@ export default function PhotosSimple() {
           const url = publicUrlForPath(path);
 
           return (
-            <Pressable
-              style={[
-                styles.tile,
-                { width: grid.tile, height: grid.tile + 28 },
-              ]}
-              onPress={() => openViewerByIndex(index)}
-            >
-              <Image
-                source={{ uri: url }}
-                style={[styles.tileImage, { width: grid.tile, height: grid.tile }]}
-                resizeMode="cover"
-              />
+            <Pressable style={[styles.tile, { width: grid.tile, height: grid.tile + 28 }]} onPress={() => openViewerByIndex(index)}>
+              <Image source={{ uri: url }} style={[styles.tileImage, { width: grid.tile, height: grid.tile }]} resizeMode="cover" />
               <Text style={styles.tileText} numberOfLines={1}>
                 {item.name}
               </Text>
@@ -508,13 +630,7 @@ export default function PhotosSimple() {
         }
       />
 
-      <Modal
-        visible={viewerOpen}
-        animationType="fade"
-        transparent
-        onRequestClose={closeViewer}
-        presentationStyle="overFullScreen"
-      >
+      <Modal visible={viewerOpen} animationType="fade" transparent onRequestClose={closeViewer} presentationStyle="overFullScreen">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
@@ -522,7 +638,7 @@ export default function PhotosSimple() {
                 {currentItem?.name || "Photo"}
               </Text>
 
-              <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                 <Pressable
                   style={[styles.actionBtn, (!hasPrev || busy) && styles.btnDisabled]}
                   onPress={() => hasPrev && openViewerByIndex(viewerIndex - 1)}
@@ -539,12 +655,18 @@ export default function PhotosSimple() {
                   <Text style={styles.actionText}>Next</Text>
                 </Pressable>
 
+                <Pressable style={[styles.actionBtn, zoom <= 1 && styles.btnDisabled]} onPress={zoomOut} disabled={zoom <= 1}>
+                  <Text style={styles.actionText}>Zoom −</Text>
+                </Pressable>
+                <Pressable style={[styles.actionBtn, zoom >= 4 && styles.btnDisabled]} onPress={zoomIn} disabled={zoom >= 4}>
+                  <Text style={styles.actionText}>Zoom +</Text>
+                </Pressable>
+                <Pressable style={[styles.actionBtn, zoom === 1 && styles.btnDisabled]} onPress={resetZoom} disabled={zoom === 1}>
+                  <Text style={styles.actionText}>Reset</Text>
+                </Pressable>
+
                 {canDeleteCurrent && !confirmingDelete && (
-                  <Pressable
-                    style={[styles.actionBtn, styles.deleteBtn, busy && styles.btnDisabled]}
-                    onPress={() => setConfirmingDelete(true)}
-                    disabled={busy}
-                  >
+                  <Pressable style={[styles.actionBtn, styles.deleteBtn, busy && styles.btnDisabled]} onPress={() => setConfirmingDelete(true)} disabled={busy}>
                     <Text style={styles.actionText}>Delete</Text>
                   </Pressable>
                 )}
@@ -556,8 +678,35 @@ export default function PhotosSimple() {
             </View>
 
             {!!currentUrl && (
-              <View style={styles.viewerBody} {...panResponder.panHandlers}>
-                <Image source={{ uri: currentUrl }} style={styles.fullImage} resizeMode="contain" />
+              <View style={{ flex: 1 }}>
+                <View style={{ flex: 1 }} {...panResponder.panHandlers}>
+                  <ScrollView
+                    style={{ flex: 1 }}
+                    contentContainerStyle={{
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: "#000",
+                    }}
+                    maximumZoomScale={Platform.OS === "ios" ? 4 : undefined}
+                    minimumZoomScale={Platform.OS === "ios" ? 1 : undefined}
+                    bounces={false}
+                    showsHorizontalScrollIndicator={false}
+                    showsVerticalScrollIndicator={false}
+                    scrollEnabled={zoom > 1}
+                  >
+                    <View style={{ width: width, height: viewerHeight, alignItems: "center", justifyContent: "center" }}>
+                      <Image
+                        source={{ uri: currentUrl }}
+                        resizeMode="contain"
+                        style={{
+                          width: width,
+                          height: viewerHeight,
+                          transform: [{ scale: zoom }],
+                        }}
+                      />
+                    </View>
+                  </ScrollView>
+                </View>
               </View>
             )}
 
@@ -565,18 +714,10 @@ export default function PhotosSimple() {
               <View style={styles.confirmBar}>
                 <Text style={styles.confirmText}>Confirm delete?</Text>
                 <View style={{ flexDirection: "row", gap: 10 }}>
-                  <Pressable
-                    style={[styles.actionBtn, styles.cancelBtn, busy && styles.btnDisabled]}
-                    onPress={() => setConfirmingDelete(false)}
-                    disabled={busy}
-                  >
+                  <Pressable style={[styles.actionBtn, styles.cancelBtn, busy && styles.btnDisabled]} onPress={() => setConfirmingDelete(false)} disabled={busy}>
                     <Text style={styles.actionText}>Cancel</Text>
                   </Pressable>
-                  <Pressable
-                    style={[styles.actionBtn, styles.deleteBtn, busy && styles.btnDisabled]}
-                    onPress={doDeleteNow}
-                    disabled={busy}
-                  >
+                  <Pressable style={[styles.actionBtn, styles.deleteBtn, busy && styles.btnDisabled]} onPress={doDeleteNow} disabled={busy}>
                     <Text style={styles.actionText}>Confirm Delete</Text>
                   </Pressable>
                 </View>
@@ -629,14 +770,15 @@ const styles = StyleSheet.create({
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.75)",
-    padding: 18,
+    padding: 12,
     justifyContent: "center",
   },
   modalCard: {
     backgroundColor: "#fff",
     borderRadius: 14,
     overflow: "hidden",
-    maxHeight: "90%",
+    maxHeight: "95%",
+    flex: 1,
   },
   modalHeader: {
     paddingHorizontal: 12,
@@ -659,9 +801,6 @@ const styles = StyleSheet.create({
   actionText: { color: "#fff", fontWeight: "700", fontSize: 12 },
   deleteBtn: { backgroundColor: "#b00020" },
   cancelBtn: { backgroundColor: "#333" },
-
-  viewerBody: { width: "100%", backgroundColor: "#000" },
-  fullImage: { width: "100%", height: 520, backgroundColor: "#000" },
 
   confirmBar: {
     padding: 12,
