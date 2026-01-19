@@ -41,6 +41,10 @@ type PersistedMatchScore = {
   verified: boolean;
   verifiedBy: string | null;
   verifiedAt: number | null; // local-only
+
+  // ✅ NEW (from Supabase)
+  lockedAt: string | null;
+  lockedBy: string | null;
 };
 
 const DIVISION_ORDER: Division[] = ['Advanced', 'Intermediate', 'Beginner'];
@@ -92,6 +96,10 @@ type SupabaseMatchScoreRow = {
   team_b: any;
   verified: boolean;
   verified_by: string | null;
+
+  // ✅ NEW columns
+  locked_at: string | null;
+  locked_by: string | null;
 };
 
 function normalizeName(s: string) {
@@ -162,7 +170,8 @@ function asScoreFields(v: any): ScoreFields {
 }
 
 async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedMatchScore>> {
-  const url = supabaseRestUrl('match_scores?select=match_id,team_a,team_b,verified,verified_by');
+  // ✅ NEW: include locked_at, locked_by
+  const url = supabaseRestUrl('match_scores?select=match_id,team_a,team_b,verified,verified_by,locked_at,locked_by');
 
   const res = await fetch(url, { method: 'GET', headers: supabaseHeaders() });
   if (!res.ok) {
@@ -182,6 +191,9 @@ async function fetchMatchScoresFromSupabase(): Promise<Record<string, PersistedM
       verified: !!r.verified,
       verifiedBy: r.verified_by ?? null,
       verifiedAt: null,
+
+      lockedAt: r.locked_at ?? null,
+      lockedBy: r.locked_by ?? null,
     };
   }
   return out;
@@ -211,6 +223,41 @@ async function upsertMatchScoreToSupabase(row: PersistedMatchScore) {
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Supabase UPSERT failed: ${res.status} ${txt}`);
+  }
+}
+
+// ✅ NEW: call Supabase RPC functions to lock/unlock
+async function callRpcLock(matchId: string) {
+  const url = supabaseRestUrl('rpc/lock_match_score');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...supabaseHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_match_id: matchId }),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Lock RPC failed: ${res.status} ${txt}`);
+  }
+}
+
+async function callRpcUnlock(matchId: string) {
+  const url = supabaseRestUrl('rpc/unlock_match_score');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...supabaseHeaders(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_match_id: matchId }),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Unlock RPC failed: ${res.status} ${txt}`);
   }
 }
 
@@ -471,8 +518,18 @@ export default function ScoringScreen() {
     return new Set(uniqSorted([...baseline, ...supa, ...fromMatches]));
   }, [dbTeams, matches]);
 
+  const isLockedMatch = (matchId: string) => {
+    const p = persisted[matchId];
+    return !!(p?.lockedAt);
+  };
+
   const canEditMatch = (m: SavedMatch) => {
+    // Original rule: admin can edit all matches
     if (isAdmin) return true;
+
+    // New enforcement: locked matches are read-only for non-admins
+    if (isLockedMatch(m.id)) return false;
+
     if (!myTeam) return false;
     const mine = normalizeName(myTeam);
     return normalizeName(m.teamA) === mine || normalizeName(m.teamB) === mine;
@@ -512,7 +569,50 @@ export default function ScoringScreen() {
     return window.confirm(message);
   };
 
+  const onLock = async (m: SavedMatch) => {
+    if (!isAdmin) return;
+
+    const alreadyLocked = isLockedMatch(m.id);
+    if (alreadyLocked) return;
+
+    const msg = `Lock this match?\n\nOnce locked, non-admin users cannot change scores for this match.\n\nWeek ${m.week} • ${m.division}\n${m.time} • Court ${m.court}\n${m.teamA} vs ${m.teamB}`;
+    const ok = Platform.OS === 'web' ? confirmOnWeb(msg) : true;
+    if (!ok) return;
+
+    try {
+      await callRpcLock(m.id);
+      await refreshPersistedScores();
+    } catch (e: any) {
+      Alert.alert('Lock failed', e?.message || 'Could not lock this match.');
+    }
+  };
+
+  const onUnlock = async (m: SavedMatch) => {
+    if (!isAdmin) return;
+
+    const alreadyLocked = isLockedMatch(m.id);
+    if (!alreadyLocked) return;
+
+    const msg = `Unlock this match?\n\nThis will allow teams to edit scores again until you lock it.\n\nWeek ${m.week} • ${m.division}\n${m.time} • Court ${m.court}\n${m.teamA} vs ${m.teamB}`;
+    const ok = Platform.OS === 'web' ? confirmOnWeb(msg) : true;
+    if (!ok) return;
+
+    try {
+      await callRpcUnlock(m.id);
+      await refreshPersistedScores();
+    } catch (e: any) {
+      Alert.alert('Unlock failed', e?.message || 'Could not unlock this match.');
+    }
+  };
+
   const onVerifyAndSave = async (m: SavedMatch) => {
+    const locked = isLockedMatch(m.id);
+
+    if (locked && !isAdmin) {
+      Alert.alert('Locked', 'This match is locked. Scores cannot be changed.');
+      return;
+    }
+
     const editable = canEditMatch(m);
     if (!editable) {
       Alert.alert('Not allowed', 'You can only enter scores for your own match.');
@@ -552,6 +652,9 @@ export default function ScoringScreen() {
         verified: true,
         verifiedBy: by,
         verifiedAt: Date.now(),
+
+        lockedAt: p?.lockedAt ?? null,
+        lockedBy: p?.lockedBy ?? null,
       };
 
       await upsertMatchScoreToSupabase(row);
@@ -731,8 +834,10 @@ export default function ScoringScreen() {
 
               <View style={{ gap: 14 }}>
                 {section.matches.map((m) => {
-                  const editable = canEditMatch(m);
                   const p = persisted[m.id];
+                  const locked = !!(p?.lockedAt);
+
+                  const editable = canEditMatch(m);
 
                   const aFields = getFields(m.id, m.teamA, p?.teamA);
                   const bFields = getFields(m.id, m.teamB, p?.teamB);
@@ -753,6 +858,11 @@ export default function ScoringScreen() {
                       : badge === 'PARTIAL'
                         ? <Text style={{ color: 'red', fontWeight: '900' }}>PARTIAL</Text>
                         : null;
+
+                  const lockNode =
+                    locked
+                      ? <Text style={{ color: '#b00020', fontWeight: '900' }}>LOCKED</Text>
+                      : <Text style={{ color: '#333', fontWeight: '900' }}>UNLOCKED</Text>;
 
                   return (
                     <View
@@ -776,11 +886,47 @@ export default function ScoringScreen() {
                           </Text>
                           {completionNode ? <Text style={{ fontWeight: '900' }}>•</Text> : null}
                           {completionNode}
+                          <Text style={{ fontWeight: '900' }}>•</Text>
+                          {lockNode}
                         </View>
+
+                        {isAdmin ? (
+                          <View style={{ flexDirection: 'row', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+                            {!locked ? (
+                              <Pressable
+                                onPress={() => { void onLock(m); }}
+                                style={{
+                                  backgroundColor: '#111',
+                                  paddingVertical: 10,
+                                  paddingHorizontal: 14,
+                                  borderRadius: 10,
+                                }}
+                              >
+                                <Text style={{ color: 'white', fontWeight: '900' }}>Lock Match</Text>
+                              </Pressable>
+                            ) : (
+                              <Pressable
+                                onPress={() => { void onUnlock(m); }}
+                                style={{
+                                  backgroundColor: 'white',
+                                  borderWidth: 2,
+                                  borderColor: '#111',
+                                  paddingVertical: 10,
+                                  paddingHorizontal: 14,
+                                  borderRadius: 10,
+                                }}
+                              >
+                                <Text style={{ color: '#111', fontWeight: '900' }}>Unlock Match</Text>
+                              </Pressable>
+                            )}
+                          </View>
+                        ) : null}
 
                         {!editable ? (
                           <Text style={{ marginTop: 4, color: '#555', fontWeight: '700' }}>
-                            (Read-only — you can view scores but cannot edit this match)
+                            {locked
+                              ? '(Read-only — this match is locked)'
+                              : '(Read-only — you can view scores but cannot edit this match)'}
                           </Text>
                         ) : null}
 
